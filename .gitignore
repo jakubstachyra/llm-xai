@@ -1,0 +1,19 @@
+# Python / Virtual Environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Data & Scratch / Temporary test files
+data/
+scratch/
+scratch_*
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
