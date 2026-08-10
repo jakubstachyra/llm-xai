@@ -17,3 +17,7 @@ scratch_*
 .vscode/
 .idea/
 .DS_Store
+# Local thesis drafts, external PDFs and test runs
+docs/
+bibliography/
+results/rq1_test/
