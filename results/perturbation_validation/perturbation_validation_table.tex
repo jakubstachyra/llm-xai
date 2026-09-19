@@ -1,0 +1,29 @@
+\begin{table}[htbp]
+\centering
+\caption{Empiryczna weryfikacja niezmienniczości semantycznej perturbacji promptu (Faza 1)}
+\label{tab:perturbation_validation}
+\begin{tabular}{llcccc}
+\hline
+\textbf{Kategoria} & \textbf{Perturbacja} & \textbf{Zachowane [\%]} & \textbf{Flip Rate [\%]} & \textbf{Średni $|\Delta P|$} & \textbf{Acc modelu [\%]} \\
+\hline
+lexical & \texttt{contractions} & 96.0\% & 4.0\% & 0.0664 $\pm$ 0.058 & 90.4\% \\
+lexical & \texttt{synonym\_domain} & 93.9\% & 6.1\% & 0.0527 $\pm$ 0.064 & 89.7\% \\
+prefix & \texttt{prefix\_frankly} & 90.8\% & 9.2\% & 0.1035 $\pm$ 0.085 & 86.4\% \\
+prefix & \texttt{prefix\_in\_summary} & 93.0\% & 7.0\% & 0.0699 $\pm$ 0.068 & 88.8\% \\
+prefix & \texttt{prefix\_instruction} & 91.1\% & 8.9\% & 0.1236 $\pm$ 0.091 & 87.3\% \\
+prefix & \texttt{prefix\_opinion} & 94.0\% & 6.0\% & 0.0680 $\pm$ 0.067 & 90.5\% \\
+prefix & \texttt{prefix\_overall} & 93.9\% & 6.1\% & 0.0638 $\pm$ 0.065 & 89.4\% \\
+suffix & \texttt{suffix\_experience} & 93.2\% & 6.8\% & 0.0725 $\pm$ 0.069 & 88.1\% \\
+suffix & \texttt{suffix\_indeed} & 93.5\% & 6.5\% & 0.0951 $\pm$ 0.076 & 87.2\% \\
+suffix & \texttt{suffix\_movie} & 94.3\% & 5.7\% & 0.0858 $\pm$ 0.067 & 88.9\% \\
+surface & \texttt{add\_period} & 97.1\% & 2.9\% & 0.0553 $\pm$ 0.047 & 89.0\% \\
+surface & \texttt{double\_space} & 89.3\% & 10.7\% & 0.1229 $\pm$ 0.102 & 85.8\% \\
+surface & \texttt{lowercase} & 100.0\% & 0.0\% & 0.0000 $\pm$ 0.000 & 89.6\% \\
+surface & \texttt{remove\_punct} & 90.9\% & 9.1\% & 0.0935 $\pm$ 0.098 & 84.4\% \\
+surface & \texttt{typo\_swap} & 91.3\% & 8.7\% & 0.0966 $\pm$ 0.093 & 86.6\% \\
+surface & \texttt{uppercase} & 88.8\% & 11.2\% & 0.1115 $\pm$ 0.124 & 86.1\% \\
+\hline
+\multicolumn{6}{l}{\footnotesize \textit{Uwaga:} Dokładność bazowa modelu bez perturbacji: 89.6\%.} \\
+\multicolumn{6}{l}{\footnotesize \textit{Rdzeń ściśle niezmienniczy (brak flipa przy żadnej perturbacji):} 68.0\% (593/872 próbek).} \\
+\end{tabular}
+\end{table}
