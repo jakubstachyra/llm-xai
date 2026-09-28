@@ -29,6 +29,7 @@ class SentimentCausalLM:
             model_name, 
             trust_remote_code=True
         )
+        self.tokenizer.padding_side = "left"
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -48,6 +49,7 @@ class SentimentCausalLM:
         ).to(self.device)
         self.model.eval()
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
+        self.pad_token_id = self.tokenizer.pad_token_id
 
         # Determine target token IDs for " positive" and " negative"
         # We test both with and without leading space to get exact token IDs
@@ -82,7 +84,7 @@ class SentimentCausalLM:
             outputs = self.model(**inputs)
             next_token_logits = outputs.logits[0, -1, :]
             target_logits = next_token_logits[self.target_token_ids]
-            probs = torch.softmax(target_logits, dim=-1).cpu().numpy()
+            probs = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
             
         pred_class = int(np.argmax(probs))
         return pred_class, probs
@@ -91,7 +93,7 @@ class SentimentCausalLM:
         """
         Memory-safe batch prediction function compatible with SHAP and Occlusion.
         Takes 1D or 2D array of token IDs, returns probabilities [p_neg, p_pos].
-        Uses sub-batching to prevent CUDA Out-Of-Memory on 8GB GPUs.
+        Uses sub-batching to prevent CUDA Out-Of-Memory.
         """
         if len(token_ids_batch.shape) == 1:
             token_ids_batch = np.expand_dims(token_ids_batch, axis=0)
@@ -99,24 +101,86 @@ class SentimentCausalLM:
         num_samples = len(token_ids_batch)
         if num_samples <= sub_batch_size:
             token_ids_tensor = torch.tensor(token_ids_batch, dtype=torch.long, device=self.device)
+            attention_mask = (token_ids_tensor != self.pad_token_id).long()
             with torch.no_grad():
-                outputs = self.model(input_ids=token_ids_tensor)
+                outputs = self.model(input_ids=token_ids_tensor, attention_mask=attention_mask)
                 next_token_logits = outputs.logits[:, -1, :]
                 target_logits = next_token_logits[:, self.target_token_ids]
                 probs = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
-            del token_ids_tensor, outputs, next_token_logits, target_logits
+            del token_ids_tensor, attention_mask, outputs, next_token_logits, target_logits
             return probs
 
         probs_list = []
         for i in range(0, num_samples, sub_batch_size):
             chunk = token_ids_batch[i:i + sub_batch_size]
             token_ids_tensor = torch.tensor(chunk, dtype=torch.long, device=self.device)
+            attention_mask = (token_ids_tensor != self.pad_token_id).long()
             with torch.no_grad():
-                outputs = self.model(input_ids=token_ids_tensor)
+                outputs = self.model(input_ids=token_ids_tensor, attention_mask=attention_mask)
                 next_token_logits = outputs.logits[:, -1, :]
                 target_logits = next_token_logits[:, self.target_token_ids]
                 p = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
                 probs_list.append(p)
-            del token_ids_tensor, outputs, next_token_logits, target_logits
+            del token_ids_tensor, attention_mask, outputs, next_token_logits, target_logits
             
         return np.vstack(probs_list)
+
+    def predict_texts_batch(self, texts: List[str], sub_batch_size: int = 16) -> np.ndarray:
+        """
+        Batched prediction for raw texts with automatic left-padding and attention mask.
+        Returns array of shape (len(texts), 2) with probabilities [p_neg, p_pos].
+        """
+        prompts = [self.format_prompt(t) for t in texts]
+        num_samples = len(prompts)
+        probs_list = []
+
+        for i in range(0, num_samples, sub_batch_size):
+            chunk = prompts[i:i + sub_batch_size]
+            encoded = self.tokenizer(
+                chunk,
+                padding=True,
+                return_tensors="pt"
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**encoded)
+                next_token_logits = outputs.logits[:, -1, :]
+                target_logits = next_token_logits[:, self.target_token_ids]
+                p = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
+                probs_list.append(p)
+            del encoded, outputs, next_token_logits, target_logits
+
+        return np.vstack(probs_list)
+
+    def get_input_embeddings(self) -> torch.nn.Module:
+        """Returns the input embedding layer of the underlying model."""
+        return self.model.get_input_embeddings()
+
+    def predict_embeddings(
+        self, 
+        inputs_embeds: torch.Tensor, 
+        attention_mask: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Calculates probabilities directly from input embeddings.
+        Essential for the Embedding Masking Operator in faithfulness evaluations.
+        Args:
+            inputs_embeds: Tensor of shape (batch_size, seq_len, hidden_dim)
+            attention_mask: Optional tensor of shape (batch_size, seq_len)
+        Returns:
+            Tensor of probabilities of shape (batch_size, 2)
+        """
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                inputs_embeds.shape[:2], 
+                dtype=torch.long, 
+                device=inputs_embeds.device
+            )
+
+        with torch.no_grad():
+            outputs = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+            next_token_logits = outputs.logits[:, -1, :]
+            target_logits = next_token_logits[:, self.target_token_ids]
+            probs = torch.softmax(target_logits, dim=-1).float()
+        return probs
+

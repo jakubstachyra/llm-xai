@@ -11,10 +11,15 @@ try:
 except ImportError:
     IntegratedGradientsExplainer = None
 
+from .gradient_x_input import GradientXInputExplainer
+from .lime_explainer import LIMEExplainer
+
 __all__ = [
     "BaseExplainer",
     "AttributionResult",
     "OcclusionExplainer",
     "SHAPExplainer",
-    "IntegratedGradientsExplainer"
+    "IntegratedGradientsExplainer",
+    "GradientXInputExplainer",
+    "LIMEExplainer",
 ]
