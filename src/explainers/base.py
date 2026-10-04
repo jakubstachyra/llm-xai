@@ -26,6 +26,16 @@ class BaseExplainer(ABC):
     def __init__(self, model_wrapper):
         self.model_wrapper = model_wrapper
         
+    @property
+    def explainer_name(self) -> str:
+        """Returns standard readable name of the explainer."""
+        name = self.__class__.__name__.replace("Explainer", "")
+        if name == "GradientXInput":
+            return "Gradient x Input"
+        if name == "IntegratedGradients":
+            return "Integrated Gradients"
+        return name
+
     @abstractmethod
     def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
         """
@@ -39,3 +49,4 @@ class BaseExplainer(ABC):
             AttributionResult object containing tokens, attributions, and metadata.
         """
         pass
+

@@ -223,3 +223,111 @@ def plot_rq1_token_attribution_comparison(
         plt.savefig(pdf_path, bbox_inches="tight")
 
     return fig, ax
+
+
+def plot_rq2_comprehensiveness_curves(
+    df_raw: pd.DataFrame,
+    save_path: Optional[str] = None
+):
+    """
+    Plots the Comprehensiveness retention curves C(k) across perturbation steps k=1..5.
+    Compares all XAI methods against the Random Baseline with shaded standard error bands.
+    """
+    fig, ax = plt.subplots(figsize=(8.5, 5), dpi=300)
+    
+    colors = {
+        "Occlusion": "#d95f02",
+        "Gradient": "#7570b3",
+        "Integrated": "#1b9e77",
+        "LIME": "#e7298a",
+        "SHAP": "#2b5c8f",
+        "Random": "#777777"
+    }
+    
+    methods = sorted(df_raw["explainer_name"].unique())
+    k_cols = [c for c in df_raw.columns if c.startswith("c_prob_k")]
+    k_vals = [int(c.split("_k")[-1]) for c in k_cols]
+
+    for method in methods:
+        sub = df_raw[df_raw["explainer_name"] == method]
+        means = [sub[col].mean() for col in k_cols]
+        sems = [sub[col].sem() for col in k_cols]
+        
+        color_key = next((k for k in colors if k in method), "Default")
+        c = colors.get(color_key, "#333333")
+        is_random = "random" in method.lower()
+        
+        linestyle = "--" if is_random else "-"
+        marker = "s" if is_random else "o"
+        linewidth = 1.8 if is_random else 2.2
+
+        ax.plot(
+            k_vals, 
+            means, 
+            label=method, 
+            color=c, 
+            linestyle=linestyle, 
+            marker=marker, 
+            linewidth=linewidth,
+            alpha=0.9
+        )
+        ax.fill_between(
+            k_vals, 
+            np.array(means) - np.array(sems), 
+            np.array(means) + np.array(sems), 
+            color=c, 
+            alpha=0.15
+        )
+
+    ax.set_xlabel("Liczba usuniętych najważniejszych słów ($k$)", fontsize=11)
+    ax.set_ylabel("Comprehensiveness: Spadek prawdopodobieństwa $C(k)$", fontsize=11)
+    ax.set_title("Wierność atrybucji (RQ2): Krzywe Comprehensiveness $C(k)$", fontsize=12, fontweight="bold")
+    ax.set_xticks(k_vals)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=9.5)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight")
+        pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+        plt.savefig(pdf_path, bbox_inches="tight")
+
+    return fig, ax
+
+
+def plot_rq2_aopc_comparison(
+    df_summary: pd.DataFrame,
+    save_path: Optional[str] = None
+):
+    """
+    Bar chart comparing AOPC Comprehensiveness vs AOPC Sufficiency for each method.
+    """
+    fig, ax = plt.subplots(figsize=(9, 4.5), dpi=300)
+    
+    methods = df_summary["explainer_name"].tolist()
+    x = np.arange(len(methods))
+    width = 0.35
+
+    aopc_c = df_summary["aopc_c_prob_mean"].values
+    aopc_u = df_summary["aopc_u_prob_mean"].values
+
+    ax.bar(x - width/2, aopc_c, width, label="Comprehensiveness ($AOPC_C$)", color="#2b5c8f", alpha=0.85)
+    ax.bar(x + width/2, aopc_u, width, label="Sufficiency ($AOPC_U$)", color="#e7298a", alpha=0.85)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(methods, rotation=15, ha="right", fontsize=10)
+    ax.set_ylabel("Wartość AOPC (Probability Drop)", fontsize=11)
+    ax.set_title("Porównanie wierności wyjaśnień: $AOPC_C$ vs $AOPC_U$", fontsize=12, fontweight="bold")
+    ax.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=9.5)
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight")
+        pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+        plt.savefig(pdf_path, bbox_inches="tight")
+
+    return fig, ax
+
