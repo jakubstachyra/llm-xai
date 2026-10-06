@@ -36,8 +36,15 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from models import SentimentCausalLM
-from explainers import OcclusionExplainer, SHAPExplainer, IntegratedGradientsExplainer
+from explainers import (
+    OcclusionExplainer,
+    SHAPExplainer,
+    IntegratedGradientsExplainer,
+    GradientXInputExplainer,
+    LIMEExplainer,
+)
 from experiments.rq1_stability import RQ1StabilityExperiment
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -137,10 +144,14 @@ def main():
     explainers = []
     if "occlusion" in selected_methods or "loo" in selected_methods:
         explainers.append(OcclusionExplainer(model))
+    if "grad_x_input" in selected_methods or "grad" in selected_methods or "saliency" in selected_methods:
+        explainers.append(GradientXInputExplainer(model))
     if "ig" in selected_methods or "integrated_gradients" in selected_methods:
         if IntegratedGradientsExplainer is None:
             raise ImportError("Brak modułu IntegratedGradientsExplainer lub jego zależności!")
         explainers.append(IntegratedGradientsExplainer(model, steps=args.ig_steps))
+    if "lime" in selected_methods:
+        explainers.append(LIMEExplainer(model, num_samples=150, seed=args.seed))
     if "shap" in selected_methods:
         if SHAPExplainer is None:
             raise ImportError("Pakiet 'shap' nie jest zainstalowany w aktywnym środowisku! Uruchom skrypt w .venv.")
@@ -148,6 +159,7 @@ def main():
 
     if not explainers:
         raise ValueError(f"Nie wybrano żadnej poprawnej metody z: {args.methods}")
+
 
     # 3. Create and execute experiment
     experiment = RQ1StabilityExperiment(
