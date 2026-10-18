@@ -43,15 +43,33 @@ def generate_joint_rq1_rq2_analysis(
         return n
 
     # Group RQ1 to overall mean per explainer
+    kendall_col = "kendall_mean" if "kendall_mean" in df_rq1.columns else "kendall_tau_mean"
+    jaccard_col = "jaccard_k3_mean" if "jaccard_k3_mean" in df_rq1.columns else "top3_jaccard_mean"
+
     if "perturbation_name" in df_rq1.columns:
-        rq1_agg = df_rq1.groupby("explainer_name").agg({
+        agg_dict = {
             "spearman_mean": "mean",
-            "spearman_sem": "mean",
-            "kendall_tau_mean": "mean",
-            "top3_jaccard_mean": "mean",
-        }).reset_index()
+            kendall_col: "mean",
+            jaccard_col: "mean",
+        }
+        if "spearman_std" in df_rq1.columns:
+            agg_dict["spearman_std"] = "mean"
+
+        rq1_agg = df_rq1.groupby("explainer_name").agg(agg_dict).reset_index()
+        # Rename to standardized names
+        rq1_agg = rq1_agg.rename(columns={
+            kendall_col: "kendall_tau_mean",
+            jaccard_col: "top3_jaccard_mean",
+        })
+        if "spearman_std" in rq1_agg.columns:
+            rq1_agg["spearman_sem"] = rq1_agg["spearman_std"] / np.sqrt(16)
+        else:
+            rq1_agg["spearman_sem"] = 0.0
     else:
         rq1_agg = df_rq1.copy()
+        if "spearman_sem" not in rq1_agg.columns:
+            rq1_agg["spearman_sem"] = 0.0
+
 
     rq1_agg["clean_name"] = rq1_agg["explainer_name"].apply(clean_name)
     df_rq2["clean_name"] = df_rq2["explainer_name"].apply(clean_name)
