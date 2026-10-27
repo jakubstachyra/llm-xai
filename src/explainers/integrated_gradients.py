@@ -52,8 +52,17 @@ class IntegratedGradientsExplainer(BaseExplainer):
         delta = input_embeds - baseline_embeds
         total_grads = torch.zeros_like(input_embeds)
 
-        # Numerical integration using Riemann sum over steps
-        alphas = torch.linspace(0.0, 1.0, steps=self.steps, device=self.model_wrapper.device)
+        # Compute true baseline logit F(x') without gradient
+        with torch.no_grad():
+            baseline_outputs = self.model_wrapper.model(inputs_embeds=baseline_embeds)
+            baseline_logit = float(baseline_outputs.logits[0, -1, target_token_id].item())
+            input_outputs = self.model_wrapper.model(inputs_embeds=input_embeds)
+            input_logit = float(input_outputs.logits[0, -1, target_token_id].item())
+            del baseline_outputs, input_outputs
+        self.model_wrapper.forward_pass_count += 2
+
+        # Numerical integration using Riemann sum over steps k/m (Sundararajan et al., 2017)
+        alphas = torch.linspace(1.0 / self.steps, 1.0, steps=self.steps, device=self.model_wrapper.device)
         
         for alpha in alphas:
             interpolated = (baseline_embeds + alpha * delta).detach().clone().requires_grad_(True)
@@ -65,6 +74,8 @@ class IntegratedGradientsExplainer(BaseExplainer):
             total_grads += grad.detach()
             
             del interpolated, outputs, target_logit, grad
+            self.model_wrapper.forward_pass_count += 1
+            self.model_wrapper.increment_backward_passes(1)
 
         avg_grads = total_grads / self.steps
         # Token attribution: (input - baseline) * avg_grads, summed over embedding dimension
@@ -79,11 +90,24 @@ class IntegratedGradientsExplainer(BaseExplainer):
         ]
         execution_time = time.time() - start_time
         
+        # Calculate Completeness Axiom error (Sundararajan et al., 2017)
+        delta_f = input_logit - baseline_logit
+        sum_attr = float(attributions.sum())
+        # Normalized relative error (with lower bound on denominator to prevent div-by-zero on neutral inputs)
+        denom = max(abs(delta_f), 1.0)
+        completeness_error = float(abs(sum_attr - delta_f) / denom)
+        
         return AttributionResult(
             tokens=tokens,
             attributions=attributions,
             target_class=target_class,
             execution_time=execution_time,
             explainer_name=f"Integrated Gradients (steps={self.steps})",
-            baseline_prob=baseline_prob
+            baseline_prob=baseline_prob,
+            metadata={
+                "steps": self.steps,
+                "completeness_error": completeness_error,
+                "delta_f": delta_f,
+                "sum_attributions": float(attributions.sum())
+            }
         )

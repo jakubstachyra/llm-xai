@@ -44,6 +44,8 @@ class GradientXInputExplainer(BaseExplainer):
         
         # Backward pass
         grad = torch.autograd.grad(target_logit, input_embeds)[0] # shape: (1, seq_len, hidden_dim)
+        self.model_wrapper.forward_pass_count += 1
+        self.model_wrapper.increment_backward_passes(1)
         
         # Dot product across embedding dimension: <x_i, g_i>
         token_attr = (input_embeds * grad).sum(dim=-1).squeeze(0) # shape: (seq_len,)

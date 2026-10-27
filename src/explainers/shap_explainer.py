@@ -8,9 +8,12 @@ class SHAPExplainer(BaseExplainer):
     """
     SHAP Permutation Explainer for Causal LLM Token Attribution.
     """
-    def __init__(self, model_wrapper, max_evals: int = 100, mask_token_id: Optional[int] = None):
+    stochastic = True
+
+    def __init__(self, model_wrapper, max_evals: int = 100, mask_token_id: Optional[int] = None, seed: int = 42):
         super().__init__(model_wrapper)
         self.max_evals = max_evals
+        self.seed = seed
         if mask_token_id is not None:
             self.mask_token_id = mask_token_id
         else:
@@ -18,7 +21,7 @@ class SHAPExplainer(BaseExplainer):
             if self.mask_token_id is None:
                 self.mask_token_id = getattr(self.model_wrapper.tokenizer, "eos_token_id", 0)
 
-    def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
+    def explain(self, text: str, target_class: Optional[int] = None, seed: Optional[int] = None) -> AttributionResult:
         start_time = time.time()
         
         prompt = self.model_wrapper.format_prompt(text)
@@ -32,7 +35,10 @@ class SHAPExplainer(BaseExplainer):
         baseline_prob = float(probs[target_class])
         
         background = np.full(input_ids.shape, self.mask_token_id, dtype=input_ids.dtype)
-        explainer = shap.explainers.PermutationExplainer(self.model_wrapper.predict_tokens_batch, background)
+        effective_seed = self.seed if seed is None else seed
+        explainer = shap.explainers.PermutationExplainer(
+            self.model_wrapper.predict_tokens_batch, background, seed=effective_seed
+        )
         
         # PermutationExplainer requires at least 2 * num_features + 1
         min_evals = 2 * len(input_ids_flat) + 1

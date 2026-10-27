@@ -59,6 +59,12 @@ class SentimentCausalLM:
         self.target_token_ids = [neg_id, pos_id] # 0: negative, 1: positive
         print(f"Target token IDs -> Negative: {neg_id} ('{self.tokenizer.decode([neg_id])}'), Positive: {pos_id} ('{self.tokenizer.decode([pos_id])}')")
 
+        # Hardware-invariant complexity tracking
+        self.forward_pass_count = 0
+        self.backward_pass_count = 0
+        self.forward_token_count = 0
+        self._baseline_forward_latency_s = None
+
     def _get_token_id(self, token_str: str, default: str) -> int:
         ids = self.tokenizer.encode(token_str, add_special_tokens=False)
         if len(ids) > 0:
@@ -79,6 +85,8 @@ class SentimentCausalLM:
         """
         prompt = self.format_prompt(text)
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        self.forward_pass_count += 1
+        self.forward_token_count += int(inputs["input_ids"].shape[1])
         
         with torch.no_grad():
             outputs = self.model(**inputs)
@@ -99,6 +107,9 @@ class SentimentCausalLM:
             token_ids_batch = np.expand_dims(token_ids_batch, axis=0)
             
         num_samples = len(token_ids_batch)
+        self.forward_pass_count += num_samples
+        self.forward_token_count += int(token_ids_batch.size)
+
         if num_samples <= sub_batch_size:
             token_ids_tensor = torch.tensor(token_ids_batch, dtype=torch.long, device=self.device)
             attention_mask = (token_ids_tensor != self.pad_token_id).long()
@@ -137,10 +148,13 @@ class SentimentCausalLM:
         for i in range(0, num_samples, sub_batch_size):
             chunk = prompts[i:i + sub_batch_size]
             encoded = self.tokenizer(
-                chunk,
-                padding=True,
+                chunk, 
+                padding=True, 
                 return_tensors="pt"
             ).to(self.device)
+            
+            self.forward_pass_count += len(chunk)
+            self.forward_token_count += int(encoded["input_ids"].numel())
 
             with torch.no_grad():
                 outputs = self.model(**encoded)
@@ -164,11 +178,6 @@ class SentimentCausalLM:
         """
         Calculates probabilities directly from input embeddings.
         Essential for the Embedding Masking Operator in faithfulness evaluations.
-        Args:
-            inputs_embeds: Tensor of shape (batch_size, seq_len, hidden_dim)
-            attention_mask: Optional tensor of shape (batch_size, seq_len)
-        Returns:
-            Tensor of probabilities of shape (batch_size, 2)
         """
         if attention_mask is None:
             attention_mask = torch.ones(
@@ -177,10 +186,67 @@ class SentimentCausalLM:
                 device=inputs_embeds.device
             )
 
+        self.forward_pass_count += int(inputs_embeds.shape[0])
+        self.forward_token_count += int(inputs_embeds.shape[0] * inputs_embeds.shape[1])
+
         with torch.no_grad():
             outputs = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
             next_token_logits = outputs.logits[:, -1, :]
             target_logits = next_token_logits[:, self.target_token_ids]
             probs = torch.softmax(target_logits, dim=-1).float()
         return probs
+
+    def reset_counters(self):
+        """Resets hardware-invariant operation counters."""
+        self.forward_pass_count = 0
+        self.backward_pass_count = 0
+        self.forward_token_count = 0
+
+    def increment_backward_passes(self, count: int = 1):
+        """Increments backward / gradient pass counter."""
+        self.backward_pass_count += count
+
+    def get_counters(self) -> Dict[str, int]:
+        """Returns snapshot of hardware-invariant counters."""
+        return {
+            "forward_passes": self.forward_pass_count,
+            "backward_passes": self.backward_pass_count,
+            "forward_tokens": self.forward_token_count
+        }
+
+    def benchmark_baseline_forward(self, num_trials: int = 15) -> float:
+        """
+        Benchmarks median latency of 1 forward pass on current hardware.
+        Used to normalize all explanation runtimes into hardware-invariant Forward Units (FwdU).
+        """
+        import time
+        if self._baseline_forward_latency_s is not None:
+            return self._baseline_forward_latency_s
+
+        sample_prompt = self.format_prompt("It is a charming and thoroughly engaging romantic comedy.")
+        inputs = self.tokenizer(sample_prompt, return_tensors="pt").to(self.device)
+
+        # Warm-up GPU
+        with torch.no_grad():
+            for _ in range(5):
+                _ = self.model(**inputs)
+
+        latencies = []
+        for _ in range(num_trials):
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            with torch.no_grad():
+                _ = self.model(**inputs)
+            if self.device == "cuda":
+                torch.cuda.synchronize()
+            latencies.append(time.perf_counter() - t0)
+
+        self._baseline_forward_latency_s = float(np.median(latencies))
+        return self._baseline_forward_latency_s
+
+    def compute_relative_fwdu(self, elapsed_seconds: float) -> float:
+        """Converts raw elapsed seconds into Relative Forward Units (FwdU)."""
+        baseline = self.benchmark_baseline_forward()
+        return float(elapsed_seconds / baseline) if baseline > 0 else 0.0
 

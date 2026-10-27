@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import inspect
 import pandas as pd
 import numpy as np
 import torch
@@ -21,6 +22,16 @@ from .visualizations import (
     plot_rq1_jaccard_k_curves,
     plot_rq1_token_attribution_comparison
 )
+
+
+NOISE_FLOOR_CATEGORY = "control"
+NOISE_FLOOR_NAME = "reseed_same_text"
+
+
+def explainer_label(explainer: BaseExplainer) -> str:
+    """Unique key of an explainer configuration (e.g. 'SHAP_B500'); falls back to the class name."""
+    label = getattr(explainer, "config_label", None)
+    return label if label else explainer.__class__.__name__.replace("Explainer", "")
 
 
 class RQ1StabilityExperiment:
@@ -93,7 +104,9 @@ class RQ1StabilityExperiment:
         filter_decision_preserved: bool = True,
         progress_bar: bool = True,
         checkpoint_path: Optional[str] = None,
-        max_samples_this_run: Optional[int] = None
+        max_samples_this_run: Optional[int] = None,
+        include_noise_floor: bool = False,
+        checkpoint_interval: int = 10
     ) -> pd.DataFrame:
         """
         Executes the stability evaluation benchmark with incremental checkpointing.
@@ -131,7 +144,7 @@ class RQ1StabilityExperiment:
         iterator = tqdm(enumerate(samples), total=len(samples), desc="Ewaluacja próbek RQ1") if progress_bar else enumerate(samples)
 
         unflushed_records: List[Dict[str, Any]] = []
-        checkpoint_interval = 10
+        # checkpoint_interval: flush to disk every N processed samples (parameter)
 
         try:
             for sample_idx, item in iterator:
@@ -143,14 +156,20 @@ class RQ1StabilityExperiment:
                 true_label = item["label"]
                 
                 # Check if all explainers for this sample_idx are already completed
-                explainer_names = [e.__class__.__name__.replace("Explainer", "") for e in self.explainers]
+                explainer_names = [explainer_label(e) for e in self.explainers]
                 cat_perts = TextPerturber.get_categorized_perturbations(text)
                 all_pert_names = [p_name for perts in cat_perts.values() for p_name in perts.keys()]
+
+                def _needs_control(exp) -> bool:
+                    return include_noise_floor and getattr(exp, "stochastic", False)
 
                 all_done = all(
                     (sample_idx, exp_name, p_name) in completed_units
                     for exp_name in explainer_names
                     for p_name in all_pert_names
+                ) and all(
+                    (sample_idx, explainer_label(e), NOISE_FLOOR_NAME) in completed_units
+                    for e in self.explainers if _needs_control(e)
                 )
                 if all_done:
                     continue  # Skip already fully evaluated sample
@@ -181,22 +200,29 @@ class RQ1StabilityExperiment:
 
                 # Generate explanations and compute stability
                 for explainer in self.explainers:
-                    explainer_name = explainer.__class__.__name__.replace("Explainer", "")
+                    explainer_name = explainer_label(explainer)
+                    method_family = getattr(explainer, "config_family", explainer.__class__.__name__.replace("Explainer", ""))
+                    param_value = getattr(explainer, "config_param", None)
                     
                     # Filter perturbations that are already in checkpoint for this explainer
                     perts_to_run = [
                         (p_name, p_info) for p_name, p_info in pert_status.items()
                         if (sample_idx, explainer_name, p_name) not in completed_units
                     ]
-                    if not perts_to_run:
+                    run_control = _needs_control(explainer) and (sample_idx, explainer_name, NOISE_FLOOR_NAME) not in completed_units
+                    if not perts_to_run and not run_control:
                         continue
 
                     # Reset GPU memory stats before explanation
                     if torch.cuda.is_available():
                         torch.cuda.reset_peak_memory_stats()
 
-                    # Explain original prompt
+                    # Explain original prompt (measure hardware-invariant cost via model counters)
+                    c0 = self.model.get_counters()
                     orig_res = explainer.explain(text, target_class=pred_class)
+                    c1 = self.model.get_counters()
+                    orig_fwd = c1["forward_passes"] - c0["forward_passes"]
+                    orig_bwd = c1["backward_passes"] - c0["backward_passes"]
                     orig_time = orig_res.execution_time
                     orig_vram_mb = (torch.cuda.max_memory_allocated() / (1024 * 1024)) if torch.cuda.is_available() else 0.0
 
@@ -216,7 +242,9 @@ class RQ1StabilityExperiment:
                         if torch.cuda.is_available():
                             torch.cuda.reset_peak_memory_stats()
 
+                        c0 = self.model.get_counters()
                         pert_res = explainer.explain(pert_text, target_class=pred_class)
+                        c1 = self.model.get_counters()
                         pert_vram_mb = (torch.cuda.max_memory_allocated() / (1024 * 1024)) if torch.cuda.is_available() else 0.0
 
                         if sample_idx == 0 and pert_name == "prefix_overall":
@@ -233,6 +261,8 @@ class RQ1StabilityExperiment:
                         row = {
                             "sample_id": sample_idx,
                             "explainer_name": explainer_name,
+                            "method_family": method_family,
+                            "param_value": param_value,
                             "perturbation_category": category,
                             "perturbation_name": pert_name,
                             "is_preserved": is_preserved,
@@ -251,11 +281,58 @@ class RQ1StabilityExperiment:
                             "jaccard_k5": jaccard_k5,
                             "orig_time_s": orig_time,
                             "pert_time_s": pert_res.execution_time,
-                            "vram_mb": max(orig_vram_mb, pert_vram_mb)
+                            "vram_mb": max(orig_vram_mb, pert_vram_mb),
+                            "orig_forward_passes": orig_fwd,
+                            "orig_backward_passes": orig_bwd,
+                            "pert_forward_passes": c1["forward_passes"] - c0["forward_passes"],
+                            "pert_backward_passes": c1["backward_passes"] - c0["backward_passes"]
                         }
                         records.append(row)
                         sample_new_records.append(row)
                         completed_units.add((sample_idx, explainer_name, pert_name))
+
+                    # Noise-floor control: same text, different random seed. Separates intrinsic
+                    # Monte-Carlo variance of LIME/SHAP from sensitivity to text perturbations
+                    # (Visani et al. 2022; Alvarez-Melis & Jaakkola 2018).
+                    if run_control:
+                        ctrl_kwargs = {}
+                        if "seed" in inspect.signature(explainer.explain).parameters:
+                            ctrl_kwargs["seed"] = int(getattr(explainer, "seed", 42)) + 1000
+                        c0 = self.model.get_counters()
+                        ctrl_res = explainer.explain(text, target_class=pred_class, **ctrl_kwargs)
+                        c1 = self.model.get_counters()
+                        row = {
+                            "sample_id": sample_idx,
+                            "explainer_name": explainer_name,
+                            "method_family": method_family,
+                            "param_value": param_value,
+                            "perturbation_category": NOISE_FLOOR_CATEGORY,
+                            "perturbation_name": NOISE_FLOOR_NAME,
+                            "is_preserved": True,
+                            "original_text": text,
+                            "perturbed_text": text,
+                            "true_label": true_label,
+                            "orig_pred": pred_class,
+                            "pert_pred": pred_class,
+                            "p_orig": p_target,
+                            "p_pert": p_target,
+                            "spearman": stability_spearman(orig_res, ctrl_res),
+                            "kendall": stability_kendall_tau(orig_res, ctrl_res),
+                            "pearson": stability_pearson(orig_res, ctrl_res),
+                            "jaccard_k1": stability_topk_jaccard(orig_res, ctrl_res, k=1),
+                            "jaccard_k3": stability_topk_jaccard(orig_res, ctrl_res, k=3),
+                            "jaccard_k5": stability_topk_jaccard(orig_res, ctrl_res, k=5),
+                            "orig_time_s": orig_time,
+                            "pert_time_s": ctrl_res.execution_time,
+                            "vram_mb": orig_vram_mb,
+                            "orig_forward_passes": orig_fwd,
+                            "orig_backward_passes": orig_bwd,
+                            "pert_forward_passes": c1["forward_passes"] - c0["forward_passes"],
+                            "pert_backward_passes": c1["backward_passes"] - c0["backward_passes"]
+                        }
+                        records.append(row)
+                        sample_new_records.append(row)
+                        completed_units.add((sample_idx, explainer_name, NOISE_FLOOR_NAME))
 
                 if sample_new_records:
                     unflushed_records.extend(sample_new_records)

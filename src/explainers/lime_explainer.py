@@ -14,6 +14,8 @@ class LIMEExplainer(BaseExplainer):
     weights samples using an exponential kernel on cosine/Hamming distance, and fits a weighted
     Ridge regression surrogate model to estimate local token importance.
     """
+    stochastic = True
+
     def __init__(
         self, 
         model_wrapper, 
@@ -28,7 +30,12 @@ class LIMEExplainer(BaseExplainer):
         self.alpha = alpha
         self.seed = seed
 
-    def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
+    def explain(
+        self, 
+        text: str, 
+        target_class: Optional[int] = None, 
+        seed: Optional[int] = None
+    ) -> AttributionResult:
         start_time = time.time()
         
         prompt = self.model_wrapper.format_prompt(text)
@@ -77,7 +84,8 @@ class LIMEExplainer(BaseExplainer):
             )
 
         # Generate binary perturbation masks for review tokens: shape (num_samples, num_review_tokens)
-        rng = np.random.default_rng(self.seed)
+        effective_seed = self.seed if seed is None else seed
+        rng = np.random.default_rng(effective_seed)
         
         # Mask 0 is all ones (original unperturbed instance)
         masks = rng.choice([0, 1], size=(self.num_samples, num_review_tokens), p=[0.3, 0.7])
@@ -117,6 +125,13 @@ class LIMEExplainer(BaseExplainer):
         # Fit weighted Ridge regression surrogate
         ridge = Ridge(alpha=self.alpha, fit_intercept=True)
         ridge.fit(masks, y, sample_weight=weights)
+
+        # Compute weighted R^2 score of surrogate fit
+        y_pred = ridge.predict(masks)
+        weighted_mean_y = np.average(y, weights=weights)
+        ss_tot = np.sum(weights * (y - weighted_mean_y) ** 2)
+        ss_res = np.sum(weights * (y - y_pred) ** 2)
+        r2_score = float(1.0 - (ss_res / (ss_tot + 1e-12))) if ss_tot > 0 else 1.0
         
         # Map estimated coefficients back to full prompt token attributions
         attributions = np.zeros(num_tokens)
@@ -131,5 +146,6 @@ class LIMEExplainer(BaseExplainer):
             target_class=target_class,
             execution_time=execution_time,
             explainer_name="LIME",
-            baseline_prob=baseline_prob
+            baseline_prob=baseline_prob,
+            metadata={"r2_score": r2_score, "seed": effective_seed}
         )

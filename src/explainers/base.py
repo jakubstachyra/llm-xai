@@ -12,6 +12,7 @@ class AttributionResult:
     execution_time: float     # time taken in seconds
     explainer_name: str
     baseline_prob: Optional[float] = None
+    metadata: Optional[Dict[str, Any]] = None
 
     def top_k_tokens(self, k: int = 3) -> List[tuple]:
         """Returns top K tokens with highest positive attributions."""
@@ -22,6 +23,10 @@ class AttributionResult:
 
 class BaseExplainer(ABC):
     """Abstract Base Class for LLM Interpretability Explainer Methods."""
+
+    # True for methods using Monte Carlo sampling (LIME, SHAP). Such methods have an intrinsic
+    # run-to-run variance that must be separated from perturbation sensitivity (noise floor).
+    stochastic: bool = False
     
     def __init__(self, model_wrapper):
         self.model_wrapper = model_wrapper
