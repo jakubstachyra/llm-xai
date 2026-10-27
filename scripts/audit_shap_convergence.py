@@ -61,12 +61,27 @@ def run_shap_convergence_study(
     indices = rng.choice(len(all_data), size=num_samples, replace=False)
     samples = [all_data[i] for i in sorted(indices)]
 
+    csv_path = os.path.join(output_dir, "shap_convergence_results.csv")
+    existing_df = None
+    existing_evals = set()
+    if os.path.exists(csv_path):
+        try:
+            existing_df = pd.read_csv(csv_path)
+            existing_evals = set(existing_df["max_evals"].astype(int).tolist())
+            print(f"[Resume] Found existing results for max_evals: {sorted(existing_evals)}")
+        except Exception as e:
+            print(f"[Warning] Could not read existing CSV: {e}")
+
     records = []
 
     # Test perturbation: neutral prefix
     test_prefix = "Review: "
 
     for max_evals in eval_grid:
+        if max_evals in existing_evals:
+            print(f"---> Skipping max_evals = {max_evals} (already computed).")
+            continue
+
         print(f"\n---> Testing SHAP with max_evals = {max_evals}...")
         explainer = SHAPExplainer(model, max_evals=max_evals)
 
@@ -115,10 +130,18 @@ def run_shap_convergence_study(
               f"Repeatability rho={rec['repeatability_rho_mean']:.3f} | "
               f"Stability rho={rec['stability_rho_mean']:.3f}")
 
-    df_results = pd.DataFrame(records)
-    csv_path = os.path.join(output_dir, "shap_convergence_results.csv")
+    if records:
+        new_df = pd.DataFrame(records)
+        if existing_df is not None:
+            df_results = pd.concat([existing_df, new_df], ignore_index=True)
+        else:
+            df_results = new_df
+    else:
+        df_results = existing_df
+
+    df_results = df_results.sort_values(by="max_evals").drop_duplicates(subset=["max_evals"], keep="last")
     df_results.to_csv(csv_path, index=False)
-    print(f"\n[Saved] CSV summary saved to: {csv_path}")
+    print(f"\n[Saved] Updated CSV summary saved to: {csv_path}")
 
     # Generate Dual-Axis Publication Chart
     fig, ax1 = plt.subplots(figsize=(8.5, 5), dpi=300)
