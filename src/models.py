@@ -51,6 +51,10 @@ class SentimentCausalLM:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.pad_token_id = self.tokenizer.pad_token_id
 
+        if self.device == "cuda" and torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
         # Determine target token IDs for " positive" and " negative"
         # We test both with and without leading space to get exact token IDs
         pos_id = self._get_token_id(" positive", default="positive")

@@ -65,7 +65,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
         # Vectorized/batched integration to saturate GPU Tensor Cores (A100/L4)
         if self.model_wrapper.device == "cuda" and torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            ig_batch_size = 32 if total_mem >= 16 else 8
+            ig_batch_size = 64 if total_mem >= 30 else (32 if total_mem >= 16 else 8)
         else:
             ig_batch_size = 4
 

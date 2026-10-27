@@ -114,7 +114,7 @@ class LIMEExplainer(BaseExplainer):
             padded_batch.append([pad_id] * (max_len - len(s)) + s)
             
         batch_arr = np.array(padded_batch, dtype=np.int64)
-        probs_perturbed = self.model_wrapper.predict_tokens_batch(batch_arr, sub_batch_size=32)
+        probs_perturbed = self.model_wrapper.predict_tokens_batch(batch_arr)
         y = probs_perturbed[:, target_class]
         
         # Calculate sample weights using exponential kernel on Hamming distance
