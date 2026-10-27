@@ -69,14 +69,18 @@ class IntegratedGradientsExplainer(BaseExplainer):
         else:
             ig_batch_size = 4
 
-        alphas = torch.linspace(1.0 / self.steps, 1.0, steps=self.steps, device=self.model_wrapper.device)
+        alphas = torch.linspace(
+            1.0 / self.steps, 1.0, steps=self.steps, 
+            device=self.model_wrapper.device, 
+            dtype=input_embeds.dtype
+        )
         
         for i in range(0, self.steps, ig_batch_size):
             chunk_alphas = alphas[i:i + ig_batch_size]
             B = chunk_alphas.shape[0]
             
-            # Shape: (B, seq_len, hidden_dim)
-            interpolated = (baseline_embeds.expand(B, -1, -1) + chunk_alphas.view(B, 1, 1) * delta.expand(B, -1, -1)).detach().clone().requires_grad_(True)
+            # Shape: (B, seq_len, hidden_dim) via broadcasting
+            interpolated = (baseline_embeds + chunk_alphas.view(B, 1, 1) * delta).detach().clone().requires_grad_(True)
             
             outputs = self.model_wrapper.model(inputs_embeds=interpolated)
             target_logits = outputs.logits[:, -1, target_token_id]
