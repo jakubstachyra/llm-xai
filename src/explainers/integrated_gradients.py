@@ -62,20 +62,31 @@ class IntegratedGradientsExplainer(BaseExplainer):
         self.model_wrapper.forward_pass_count += 2
 
         # Numerical integration using Riemann sum over steps k/m (Sundararajan et al., 2017)
+        # Vectorized/batched integration to saturate GPU Tensor Cores (A100/L4)
+        if self.model_wrapper.device == "cuda" and torch.cuda.is_available():
+            total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            ig_batch_size = 32 if total_mem >= 16 else 8
+        else:
+            ig_batch_size = 4
+
         alphas = torch.linspace(1.0 / self.steps, 1.0, steps=self.steps, device=self.model_wrapper.device)
         
-        for alpha in alphas:
-            interpolated = (baseline_embeds + alpha * delta).detach().clone().requires_grad_(True)
+        for i in range(0, self.steps, ig_batch_size):
+            chunk_alphas = alphas[i:i + ig_batch_size]
+            B = chunk_alphas.shape[0]
+            
+            # Shape: (B, seq_len, hidden_dim)
+            interpolated = (baseline_embeds.expand(B, -1, -1) + chunk_alphas.view(B, 1, 1) * delta.expand(B, -1, -1)).detach().clone().requires_grad_(True)
             
             outputs = self.model_wrapper.model(inputs_embeds=interpolated)
-            target_logit = outputs.logits[0, -1, target_token_id]
+            target_logits = outputs.logits[:, -1, target_token_id]
             
-            grad = torch.autograd.grad(target_logit, interpolated)[0]
-            total_grads += grad.detach()
+            grad = torch.autograd.grad(target_logits.sum(), interpolated)[0]
+            total_grads += grad.sum(dim=0, keepdim=True).detach()
             
-            del interpolated, outputs, target_logit, grad
-            self.model_wrapper.forward_pass_count += 1
-            self.model_wrapper.increment_backward_passes(1)
+            del interpolated, outputs, target_logits, grad
+            self.model_wrapper.forward_pass_count += B
+            self.model_wrapper.increment_backward_passes(B)
 
         avg_grads = total_grads / self.steps
         # Token attribution: (input - baseline) * avg_grads, summed over embedding dimension

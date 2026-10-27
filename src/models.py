@@ -106,7 +106,7 @@ class SentimentCausalLM:
         if sub_batch_size is None:
             if self.device == "cuda" and torch.cuda.is_available():
                 total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                sub_batch_size = 64 if total_mem >= 16 else 16
+                sub_batch_size = 128 if total_mem >= 30 else (64 if total_mem >= 16 else 16)
             else:
                 sub_batch_size = 8
         if len(token_ids_batch.shape) == 1:
