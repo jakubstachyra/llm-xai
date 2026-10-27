@@ -97,12 +97,18 @@ class SentimentCausalLM:
         pred_class = int(np.argmax(probs))
         return pred_class, probs
 
-    def predict_tokens_batch(self, token_ids_batch: np.ndarray, sub_batch_size: int = 8) -> np.ndarray:
+    def predict_tokens_batch(self, token_ids_batch: np.ndarray, sub_batch_size: int = None) -> np.ndarray:
         """
         Memory-safe batch prediction function compatible with SHAP and Occlusion.
         Takes 1D or 2D array of token IDs, returns probabilities [p_neg, p_pos].
-        Uses sub-batching to prevent CUDA Out-Of-Memory.
+        Dynamically adjusts sub_batch_size to fully utilize high-VRAM GPUs (A100/L4).
         """
+        if sub_batch_size is None:
+            if self.device == "cuda" and torch.cuda.is_available():
+                total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                sub_batch_size = 64 if total_mem >= 16 else 16
+            else:
+                sub_batch_size = 8
         if len(token_ids_batch.shape) == 1:
             token_ids_batch = np.expand_dims(token_ids_batch, axis=0)
             

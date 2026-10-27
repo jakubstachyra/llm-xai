@@ -213,6 +213,8 @@ class RQ1StabilityExperiment:
                     if not perts_to_run and not run_control:
                         continue
 
+                    print(f"  [Próbka {sample_idx+1}/{len(samples)}] Liczenie: {explainer_name} ({len(perts_to_run)} perturbacji)...", flush=True)
+
                     # Reset GPU memory stats before explanation
                     if torch.cuda.is_available():
                         torch.cuda.reset_peak_memory_stats()
