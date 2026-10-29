@@ -1,12 +1,12 @@
-import pytest
+import unittest
 import numpy as np
 from src.models import SentimentCausalLM
 from src.explainers import GradientXInputExplainer, LIMEExplainer
 
 
-class TestNewExplainers:
+class TestNewExplainers(unittest.TestCase):
     @classmethod
-    def setup_class(cls):
+    def setUpClass(cls):
         print("\n[TestSetup] Loading SentimentCausalLM ('microsoft/phi-2') for new explainer tests...")
         cls.model = SentimentCausalLM(model_name="microsoft/phi-2")
         cls.pos_text = "The movie was fantastic and brilliant!"

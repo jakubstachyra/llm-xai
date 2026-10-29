@@ -352,6 +352,13 @@ class RQ1StabilityExperiment:
                     write_header = not os.path.exists(checkpoint_path) or os.path.getsize(checkpoint_path) == 0
                     df_chunk.to_csv(checkpoint_path, mode="a", header=write_header, index=False)
                     unflushed_records.clear()
+                    # Also save live hardware snapshot to checkpoint directory
+                    live_hw_path = os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "hardware_live_snapshot.json")
+                    try:
+                        with open(live_hw_path, "w", encoding="utf-8") as f_hw:
+                            json.dump(tracker.snapshot_stats(samples_processed_this_run), f_hw, indent=2)
+                    except Exception:
+                        pass
 
                 # Free CUDA cache between samples to prevent memory fragmentation on 8GB GPUs
                 if torch.cuda.is_available():
@@ -385,7 +392,12 @@ class RQ1StabilityExperiment:
         self._compute_summary()
 
         stats = tracker.stop(num_samples=samples_processed_this_run)
-        tracker.log_session(stats=stats)
+        extra_hw_paths = []
+        if checkpoint_path:
+            ckpt_dir = os.path.dirname(os.path.abspath(checkpoint_path))
+            extra_hw_paths.append(os.path.join(ckpt_dir, "hardware_session_log.csv"))
+            extra_hw_paths.append(os.path.join(os.path.dirname(ckpt_dir), "hardware_session_log.csv"))
+        tracker.log_session(stats=stats, extra_csv_paths=extra_hw_paths)
         tracker.print_summary(stats=stats)
 
         return self.df_raw

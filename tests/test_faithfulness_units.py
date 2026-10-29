@@ -1,4 +1,4 @@
-import pytest
+import unittest
 import numpy as np
 import transformers
 from src.faithfulness.units import (
@@ -9,9 +9,9 @@ from src.faithfulness.units import (
 )
 
 
-class TestFaithfulnessUnits:
+class TestFaithfulnessUnits(unittest.TestCase):
     @classmethod
-    def setup_class(cls):
+    def setUpClass(cls):
         # Use Phi-2 tokenizer for realistic BPE subtoken testing
         cls.tokenizer = transformers.AutoTokenizer.from_pretrained(
             "microsoft/phi-2",
@@ -97,3 +97,26 @@ class TestFaithfulnessUnits:
         rand1 = rank_word_units(units, ranking_mode="random", seed=42)
         rand2 = rank_word_units(units, ranking_mode="random", seed=42)
         assert [u.index for u in rand1] == [u.index for u in rand2], "Random ranking must be deterministic with seed"
+
+    def test_word_unit_extraction_qwen_tokenizer(self):
+        qwen_tokenizer = transformers.AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
+        text = "A masterfully-crafted, deeply moving film... it's amazing!"
+        units = extract_word_units(text, qwen_tokenizer)
+
+        assert len(units) > 0
+        for unit in units:
+            assert text[unit.start_char:unit.end_char] == unit.text, (
+                f"Mismatch: slice '{text[unit.start_char:unit.end_char]}' != text '{unit.text}'"
+            )
+
+        masterfully_unit = next((u for u in units if u.text == "masterfully"), None)
+        assert masterfully_unit is not None
+        assert len(masterfully_unit.token_indices) == 2, f"Expected 2 subtokens for masterfully, got {masterfully_unit.tokens}"
+
+        # Check grouping on multi-subtoken words
+        text2 = "It was completely unwatchable."
+        units2 = extract_word_units(text2, qwen_tokenizer)
+        unwatchable_unit = next((u for u in units2 if u.text == "unwatchable"), None)
+        assert unwatchable_unit is not None
+        assert len(unwatchable_unit.token_indices) == 3, f"Expected 3 subtokens for unwatchable, got {unwatchable_unit.tokens}"
+

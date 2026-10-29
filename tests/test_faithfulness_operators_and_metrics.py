@@ -1,4 +1,4 @@
-import pytest
+import unittest
 import torch
 import numpy as np
 from src.faithfulness import (
@@ -12,7 +12,7 @@ from src.faithfulness import (
 )
 
 
-class TestFaithfulnessOperatorsAndMetrics:
+class TestFaithfulnessOperatorsAndMetrics(unittest.TestCase):
     def test_discrete_word_deletion_and_retention(self):
         text = "The movie was extraordinarily fantastic and brilliant!"
         # Manually create mock WordUnits with exact character offsets

@@ -367,6 +367,12 @@ class RQ2FaithfulnessExperiment:
                 samples_processed_in_this_run += 1
                 if samples_processed_in_this_run % 10 == 0:
                     flush_buffer()
+                    live_hw_path = os.path.join(os.path.abspath(self.output_dir), "hardware_live_snapshot.json")
+                    try:
+                        with open(live_hw_path, "w", encoding="utf-8") as f_hw:
+                            json.dump(tracker.snapshot_stats(samples_processed_in_this_run), f_hw, indent=2)
+                    except Exception:
+                        pass
 
         except KeyboardInterrupt:
             print("\n[RQ2] Interrupted by user! Flushing pending checkpoints to disk...")
@@ -380,7 +386,12 @@ class RQ2FaithfulnessExperiment:
         self.generate_plots()
 
         stats = tracker.stop(num_samples=samples_processed_in_this_run)
-        tracker.log_session(stats=stats)
+        out_abs = os.path.abspath(self.output_dir)
+        extra_hw_paths = [
+            os.path.join(out_abs, "hardware_session_log.csv"),
+            os.path.join(os.path.dirname(out_abs), "hardware_session_log.csv")
+        ]
+        tracker.log_session(stats=stats, extra_csv_paths=extra_hw_paths)
         tracker.print_summary(stats=stats)
 
         return self.df_raw
