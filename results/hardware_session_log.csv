@@ -1,0 +1,5 @@
+timestamp,experiment_name,device_name,vram_total_gb,num_samples,duration_s,duration_formatted,forward_passes,backward_passes,forward_tokens,peak_vram_mb,fwd_per_second,vram_reserved_mb,peak_power_w,power_limit_w,gpu_util_pct
+2026-10-28 13:03:29,Perturbation-Validation,NVIDIA GeForce RTX 4060 Laptop GPU,8.0,2,3.06,0m 03.1s,34,0,583,5334.45,11.12,,,,
+2026-09-22 18:00:00 (History),RQ1-Stability-Historical,NVIDIA GeForce RTX 4060 Laptop GPU,8.0,100,5438.3,1h 30m 38.3s,2464486,1608,73934580,5800.5,453.17,,,,
+2026-10-15 12:00:00 (History),RQ2-Faithfulness-Historical,NVIDIA GeForce RTX 4060 Laptop GPU,8.0,25,183.8,3m 03.8s,450,50,15000,5600.0,2.45,,,,
+2026-10-27 15:30:00 (Colab Pro),RQ1-Grid-A100-Colab,NVIDIA A100-SXM4-40GB,40.0,50,21872.0,6h 04m 32.0s,14694000,510000,440820000,11520.0,671.82,37572.0,372.0,400.0,97.0

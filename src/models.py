@@ -23,6 +23,8 @@ class SentimentCausalLM:
             
         if model_name.strip() in ["microsoft/phi", "phi", "phi-2", "phi2"]:
             model_name = "microsoft/phi-2"
+        self.model_name = model_name
+        self.dtype = torch_dtype if self.device == "cuda" else torch.float32
 
         print(f"Loading model '{model_name}' on {self.device}...")
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -68,6 +70,18 @@ class SentimentCausalLM:
         self.backward_pass_count = 0
         self.forward_token_count = 0
         self._baseline_forward_latency_s = None
+
+    @property
+    def device_name(self) -> str:
+        if self.device == "cuda" and torch.cuda.is_available():
+            return torch.cuda.get_device_name(0)
+        return "CPU"
+
+    @property
+    def device_memory_gb(self) -> float:
+        if self.device == "cuda" and torch.cuda.is_available():
+            return round(torch.cuda.get_device_properties(0).total_memory / (1024**3), 2)
+        return 0.0
 
     def _get_token_id(self, token_str: str, default: str) -> int:
         ids = self.tokenizer.encode(token_str, add_special_tokens=False)
