@@ -15,9 +15,10 @@ import sys
 import os
 import argparse
 
-# Check if running inside virtual environment
+# Check if running inside virtual environment (suppressed in Google Colab / Kaggle environments)
+in_colab = "COLAB_GPU" in os.environ or "COLAB_RELEASE_TAG" in os.environ or "google.colab" in sys.modules
 in_venv = (sys.prefix != sys.base_prefix) or ("VIRTUAL_ENV" in os.environ)
-if not in_venv:
+if not in_venv and not in_colab:
     print("\n" + "!" * 70)
     print("OSTRZEŻENIE: Uruchomiono skrypt w systemowym interpreterze Pythona:")
     print(f"  {sys.executable}")
