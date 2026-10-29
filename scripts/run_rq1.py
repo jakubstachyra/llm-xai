@@ -65,20 +65,26 @@ def main():
     parser.add_argument(
         "--methods",
         type=str,
-        default="occlusion,ig,shap",
-        help="Metody do ewaluacji rozdzielone przecinkiem: 'occlusion', 'ig', 'shap' (domyślnie: 'occlusion,ig,shap')"
+        default="occlusion,grad_x_input,ig,lime,shap",
+        help="Metody do ewaluacji rozdzielone przecinkiem: 'occlusion', 'grad_x_input', 'ig', 'lime', 'shap' (domyślnie: wszystkie 5)"
     )
     parser.add_argument(
         "--max-evals", 
         type=int, 
-        default=100, 
-        help="Maksymalna liczba ewaluacji dla permutacyjnego SHAP (domyślnie: 100)"
+        default=2500, 
+        help="Maksymalna liczba ewaluacji dla permutacyjnego SHAP (domyślnie: 2500)"
     )
     parser.add_argument(
         "--ig-steps",
         type=int,
-        default=20,
-        help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 20)"
+        default=100,
+        help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 100)"
+    )
+    parser.add_argument(
+        "--lime-samples",
+        type=int,
+        default=1000,
+        help="Liczba próbek sąsiedztwa dla LIME (domyślnie: 1000)"
     )
     parser.add_argument(
         "--no-filter-preserved",
@@ -109,6 +115,12 @@ def main():
         help="Maksymalna liczba nowych próbek do przeliczenia w bieżącej sesji (np. podział na partie 12-godzinne)."
     )
     
+    parser.add_argument(
+        "--no-noise-floor",
+        action="store_true",
+        help="Wyłącza kontrolę szumu własnego (reseed control) dla LIME/SHAP (domyślnie: WŁĄCZONA)"
+    )
+
     args = parser.parse_args()
 
     selected_methods = [m.strip().lower() for m in args.methods.split(",")]
@@ -126,7 +138,7 @@ def main():
     print(f"Próbki SST-2: {args.samples} (seed={args.seed})")
     print(f"Filtr par ze spójną predykcją (Decision-Preserved): {'TAK' if filter_preserved else 'NIE'}")
     print(f"Wybrane metody: {', '.join(selected_methods)}")
-    print(f"SHAP max_evals: {args.max_evals} | IG steps: {args.ig_steps}")
+    print(f"SHAP max_evals: {args.max_evals} | LIME samples: {args.lime_samples} | IG steps: {args.ig_steps}")
     print(f"Katalog wyników: {output_dir}")
     print(f"Auto-wznawianie (Checkpoint): {'WYŁĄCZONE' if args.no_resume else 'WŁĄCZONE'}")
     if args.max_run_samples:
@@ -144,14 +156,14 @@ def main():
     explainers = []
     if "occlusion" in selected_methods or "loo" in selected_methods:
         explainers.append(OcclusionExplainer(model))
-    if "grad_x_input" in selected_methods or "grad" in selected_methods or "saliency" in selected_methods:
+    if any(m in selected_methods for m in ["grad_x_input", "gradientxinput", "grad", "saliency"]):
         explainers.append(GradientXInputExplainer(model))
-    if "ig" in selected_methods or "integrated_gradients" in selected_methods:
+    if any(m in selected_methods for m in ["ig", "integrated_gradients", "integratedgradients"]):
         if IntegratedGradientsExplainer is None:
             raise ImportError("Brak modułu IntegratedGradientsExplainer lub jego zależności!")
         explainers.append(IntegratedGradientsExplainer(model, steps=args.ig_steps))
     if "lime" in selected_methods:
-        explainers.append(LIMEExplainer(model, num_samples=150, seed=args.seed))
+        explainers.append(LIMEExplainer(model, num_samples=args.lime_samples, seed=args.seed))
     if "shap" in selected_methods:
         if SHAPExplainer is None:
             raise ImportError("Pakiet 'shap' nie jest zainstalowany w aktywnym środowisku! Uruchom skrypt w .venv.")
@@ -179,7 +191,8 @@ def main():
         filter_decision_preserved=filter_preserved,
         progress_bar=True,
         checkpoint_path=checkpoint_file,
-        max_samples_this_run=args.max_run_samples
+        max_samples_this_run=args.max_run_samples,
+        include_noise_floor=not args.no_noise_floor
     )
 
     # 4. Save artifacts, summary, LaTeX and plots

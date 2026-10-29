@@ -68,20 +68,20 @@ def main():
     parser.add_argument(
         "--max-evals-shap",
         type=int,
-        default=500,
-        help="Liczba ewaluacji Monte Carlo dla PermutationExplainer w SHAP (domyślnie: 500)"
+        default=2500,
+        help="Liczba ewaluacji Monte Carlo dla PermutationExplainer w SHAP (domyślnie: 2500)"
     )
     parser.add_argument(
         "--ig-steps",
         type=int,
-        default=20,
-        help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 20)"
+        default=100,
+        help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 100)"
     )
     parser.add_argument(
         "--lime-samples",
         type=int,
-        default=150,
-        help="Liczba próbek zaburzających dla LIME (domyślnie: 150)"
+        default=1000,
+        help="Liczba próbek zaburzających dla LIME (domyślnie: 1000)"
     )
     parser.add_argument(
         "--random-trials",
@@ -132,9 +132,9 @@ def main():
     for m in selected_methods:
         if m in ["occlusion", "loo"]:
             explainers.append(OcclusionExplainer(model_wrapper))
-        elif m in ["grad_x_input", "grad", "saliency"]:
+        elif m in ["grad_x_input", "gradientxinput", "grad", "saliency"]:
             explainers.append(GradientXInputExplainer(model_wrapper))
-        elif m in ["ig", "integrated_gradients"]:
+        elif m in ["ig", "integrated_gradients", "integratedgradients"]:
             explainers.append(IntegratedGradientsExplainer(model_wrapper, steps=args.ig_steps))
         elif m in ["lime"]:
             explainers.append(LIMEExplainer(model_wrapper, num_samples=args.lime_samples, seed=args.seed))

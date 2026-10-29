@@ -6,8 +6,8 @@ import numpy as np
 import torch
 from typing import List, Dict, Any, Optional, Literal
 from tqdm import tqdm
-
 from src.models import SentimentCausalLM
+from src.hardware_tracker import HardwareSessionTracker
 from src.explainers import (
     BaseExplainer,
     OcclusionExplainer,
@@ -97,10 +97,10 @@ class RQ2FaithfulnessExperiment:
             ds = load_dataset("glue", "sst2", split="validation")
             data = [{"id": i, "sentence": row["sentence"], "label": row["label"]} for i, row in enumerate(ds)]
 
-        if len(data) > num_samples:
-            rng = np.random.default_rng(seed)
-            indices = rng.choice(len(data), size=num_samples, replace=False)
-            data = [data[i] for i in sorted(indices)]
+        # Deterministic prefix-preserving permutation (identical sample_id order to RQ1 up to full dataset 872)
+        np.random.seed(seed)
+        indices = np.random.permutation(len(data))[:min(num_samples, len(data))]
+        data = [data[i] for i in indices]
 
         return data
 
@@ -153,6 +153,9 @@ class RQ2FaithfulnessExperiment:
         print(f"  Checkpoints: Saved every 10 samples to {raw_csv_path}")
         print(f"=======================================================\n")
 
+        tracker = HardwareSessionTracker(self.model, experiment_name=f"RQ2-Faithfulness-{self.operator}", num_samples=len(dataset))
+        tracker.start()
+
         try:
             for sample_idx, sample in enumerate(tqdm(dataset, desc="Evaluating Faithfulness")):
                 sample_id = sample.get("id", sample_idx)
@@ -173,9 +176,12 @@ class RQ2FaithfulnessExperiment:
 
                 # 1. Base prediction
                 pred_class, probs_orig = self.model.predict_single(text)
+                true_label = int(sample.get("label", -1))
                 c_star = pred_class
                 p_star = float(probs_orig[c_star])
                 f_star = float(np.log(max(p_star, 1e-12)))
+                p_clip = np.clip(probs_orig, 1e-12, 1.0)
+                pred_entropy = float(-np.sum(p_clip * np.log2(p_clip)))
 
                 # 2. Extract WordUnits
                 units = extract_word_units(text, self.model.tokenizer)
@@ -226,10 +232,15 @@ class RQ2FaithfulnessExperiment:
 
                     rand_row = {
                         "sample_id": sample_id,
+                        "device_name": getattr(self.model, "device_name", "Unknown"),
                         "explainer_name": "Random Baseline",
                         "operator": self.operator,
+                        "original_text": text,
+                        "true_label": true_label,
                         "target_class": c_star,
+                        "is_correct": bool(c_star == true_label),
                         "baseline_prob": p_star,
+                        "prediction_entropy": pred_entropy,
                         "num_words": len(units),
                         "max_k": eff_k,
                         "aopc_c_prob": rand_result.aopc_comprehensiveness_prob,
@@ -239,10 +250,14 @@ class RQ2FaithfulnessExperiment:
                         "gap_g": 0.0,
                         "harmonization_h": rand_result.harmonization_h,
                         "execution_time": 0.0,
+                        "forward_passes": 0,
+                        "backward_passes": 0,
                     }
                     for i, k in enumerate(k_list):
                         rand_row[f"c_prob_k{k}"] = c_prob_rand[i]
                         rand_row[f"u_prob_k{k}"] = u_prob_rand[i]
+                        rand_row[f"c_log_k{k}"] = c_log_rand[i]
+                        rand_row[f"u_log_k{k}"] = u_log_rand[i]
 
                     unflushed_records.append(rand_row)
                     completed_keys.add(rand_key)
@@ -259,7 +274,11 @@ class RQ2FaithfulnessExperiment:
                     if key in completed_keys:
                         continue
 
+                    c0 = self.model.get_counters()
                     res = explainer.explain(text, target_class=c_star)
+                    c1 = self.model.get_counters()
+                    exp_fwd = c1["forward_passes"] - c0["forward_passes"]
+                    exp_bwd = c1["backward_passes"] - c0["backward_passes"]
                     aggregate_word_attributions(units, res.attributions, method="signed_sum")
                     ranked_units = rank_word_units(units, ranking_mode="top_signed")
 
@@ -315,10 +334,15 @@ class RQ2FaithfulnessExperiment:
 
                     row = {
                         "sample_id": sample_id,
+                        "device_name": getattr(self.model, "device_name", "Unknown"),
                         "explainer_name": method_name,
                         "operator": self.operator,
+                        "original_text": text,
+                        "true_label": true_label,
                         "target_class": c_star,
+                        "is_correct": bool(c_star == true_label),
                         "baseline_prob": p_star,
+                        "prediction_entropy": pred_entropy,
                         "num_words": len(units),
                         "max_k": eff_k,
                         "aopc_c_prob": faith_res.aopc_comprehensiveness_prob,
@@ -328,10 +352,14 @@ class RQ2FaithfulnessExperiment:
                         "gap_g": faith_res.normalized_gap_g,
                         "harmonization_h": faith_res.harmonization_h,
                         "execution_time": res.execution_time,
+                        "forward_passes": exp_fwd,
+                        "backward_passes": exp_bwd,
                     }
                     for i, k in enumerate(k_list):
                         row[f"c_prob_k{k}"] = c_prob_steps[i]
                         row[f"u_prob_k{k}"] = u_prob_steps[i]
+                        row[f"c_log_k{k}"] = c_log_steps[i]
+                        row[f"u_log_k{k}"] = u_log_steps[i]
 
                     unflushed_records.append(row)
                     completed_keys.add(key)
@@ -350,6 +378,11 @@ class RQ2FaithfulnessExperiment:
         self.generate_summary()
         self.generate_latex_table()
         self.generate_plots()
+
+        stats = tracker.stop(num_samples=samples_processed_in_this_run)
+        tracker.log_session(stats=stats)
+        tracker.print_summary(stats=stats)
+
         return self.df_raw
 
     def generate_summary(self) -> pd.DataFrame:

@@ -11,6 +11,7 @@ from tqdm import tqdm
 from models import SentimentCausalLM
 from explainers import SHAPExplainer, OcclusionExplainer, BaseExplainer, IntegratedGradientsExplainer
 from perturbations import TextPerturber
+from hardware_tracker import HardwareSessionTracker
 from metrics import (
     stability_spearman, 
     stability_kendall_tau, 
@@ -86,13 +87,10 @@ class RQ1StabilityExperiment:
             ds = load_dataset("stanfordnlp/sst2", split="validation")
             data = [{"sentence": item["sentence"], "label": item["label"]} for item in ds]
 
-        # Deterministic sampling
+        # Deterministic prefix-preserving permutation (compatible with all N up to full dataset 872)
         np.random.seed(seed)
-        if num_samples < len(data):
-            indices = np.random.choice(len(data), size=num_samples, replace=False)
-            samples = [data[i] for i in indices]
-        else:
-            samples = data[:num_samples]
+        indices = np.random.permutation(len(data))[:min(num_samples, len(data))]
+        samples = [data[i] for i in indices]
 
         print(f"[RQ1] Załadowano {len(samples)} próbek do ewaluacji (ziarno: {seed}).")
         return samples
@@ -140,6 +138,9 @@ class RQ1StabilityExperiment:
         total_pairs = 0
         preserved_pairs = 0
         samples_processed_this_run = 0
+
+        tracker = HardwareSessionTracker(self.model, experiment_name="RQ1-Stability", num_samples=num_samples)
+        tracker.start()
 
         iterator = tqdm(enumerate(samples), total=len(samples), desc="Ewaluacja próbek RQ1") if progress_bar else enumerate(samples)
 
@@ -262,6 +263,7 @@ class RQ1StabilityExperiment:
 
                         row = {
                             "sample_id": sample_idx,
+                            "device_name": getattr(self.model, "device_name", "Unknown"),
                             "explainer_name": explainer_name,
                             "method_family": method_family,
                             "param_value": param_value,
@@ -275,6 +277,7 @@ class RQ1StabilityExperiment:
                             "pert_pred": p_info["pred_class"],
                             "p_orig": p_target,
                             "p_pert": p_info["p_target"],
+                            "orig_num_tokens": len(orig_res.tokens),
                             "spearman": spearman,
                             "kendall": kendall,
                             "pearson": pearson,
@@ -305,6 +308,7 @@ class RQ1StabilityExperiment:
                         c1 = self.model.get_counters()
                         row = {
                             "sample_id": sample_idx,
+                            "device_name": getattr(self.model, "device_name", "Unknown"),
                             "explainer_name": explainer_name,
                             "method_family": method_family,
                             "param_value": param_value,
@@ -318,6 +322,7 @@ class RQ1StabilityExperiment:
                             "pert_pred": pred_class,
                             "p_orig": p_target,
                             "p_pert": p_target,
+                            "orig_num_tokens": len(orig_res.tokens),
                             "spearman": stability_spearman(orig_res, ctrl_res),
                             "kendall": stability_kendall_tau(orig_res, ctrl_res),
                             "pearson": stability_pearson(orig_res, ctrl_res),
@@ -378,6 +383,11 @@ class RQ1StabilityExperiment:
 
         print(f"\n[RQ1] Zakończono sesję. Łącznie w buforze: {len(self.df_raw)} wierszy ({len(set(self.df_raw['sample_id'])) if len(self.df_raw) > 0 else 0} unikalnych próbek).")
         self._compute_summary()
+
+        stats = tracker.stop(num_samples=samples_processed_this_run)
+        tracker.log_session(stats=stats)
+        tracker.print_summary(stats=stats)
+
         return self.df_raw
 
     def _compute_summary(self):

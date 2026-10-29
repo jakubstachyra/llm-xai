@@ -52,19 +52,36 @@ class LIMEExplainer(BaseExplainer):
             
         baseline_prob = float(probs_orig[target_class])
         
-        # Identify review tokens (excluding "Review: " prefix and "\nSentiment:" suffix)
-        prefix_ids = self.model_wrapper.tokenizer.encode("Review: ", add_special_tokens=False)
-        suffix_ids = self.model_wrapper.tokenizer.encode("\nSentiment:", add_special_tokens=False)
-        
-        prefix_len = len(prefix_ids)
-        suffix_len = len(suffix_ids)
-        
-        if num_tokens > prefix_len + suffix_len:
-            review_start = prefix_len
-            review_end = num_tokens - suffix_len
-        else:
-            review_start = 0
-            review_end = num_tokens
+        prefix = "Review: "
+        text_start = len(prefix)
+        text_end = len(prefix) + len(text)
+
+        review_start = None
+        review_end = None
+        if getattr(self.model_wrapper.tokenizer, "is_fast", False):
+            try:
+                encoded = self.model_wrapper.tokenizer(prompt, return_offsets_mapping=True, add_special_tokens=False)
+                input_ids = encoded.input_ids
+                num_tokens = len(input_ids)
+                matching = [i for i, (s, e) in enumerate(encoded.offset_mapping) if max(s, text_start) < min(e, text_end)]
+                if matching:
+                    review_start = matching[0]
+                    review_end = matching[-1] + 1
+            except Exception:
+                pass
+
+        if review_start is None or review_end is None:
+            # Fallback for tokenizers without offset_mapping
+            prefix_ids = self.model_wrapper.tokenizer.encode(prefix, add_special_tokens=False)
+            suffix_ids = self.model_wrapper.tokenizer.encode("\nSentiment:", add_special_tokens=False)
+            prefix_len = len(prefix_ids)
+            suffix_len = len(suffix_ids)
+            if num_tokens > prefix_len + suffix_len:
+                review_start = prefix_len
+                review_end = num_tokens - suffix_len
+            else:
+                review_start = 0
+                review_end = num_tokens
             
         num_review_tokens = review_end - review_start
         
