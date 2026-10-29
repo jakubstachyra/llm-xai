@@ -43,14 +43,14 @@ def main():
     parser.add_argument(
         "--samples", 
         type=int, 
-        default=400, 
-        help="Liczba próbek walidacyjnych SST-2 (domyślnie: 400)"
+        default=300, 
+        help="Liczba próbek walidacyjnych SST-2 (domyślnie: 300)"
     )
     parser.add_argument(
         "--model", 
         type=str, 
-        default="microsoft/phi-2", 
-        help="Nazwa lub identyfikator modelu Causal LM (domyślnie: 'microsoft/phi-2')"
+        default="Qwen/Qwen2.5-7B", 
+        help="Nazwa lub identyfikator modelu Causal LM (domyślnie: 'Qwen/Qwen2.5-7B')"
     )
     parser.add_argument(
         "--methods",
@@ -68,20 +68,20 @@ def main():
     parser.add_argument(
         "--max-evals-shap",
         type=int,
-        default=2500,
-        help="Liczba ewaluacji Monte Carlo dla PermutationExplainer w SHAP (domyślnie: 2500)"
+        default=1200,
+        help="Liczba ewaluacji Monte Carlo dla PermutationExplainer w SHAP (domyślnie: 1200)"
     )
     parser.add_argument(
         "--ig-steps",
         type=int,
-        default=100,
-        help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 100)"
+        default=50,
+        help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 50)"
     )
     parser.add_argument(
         "--lime-samples",
         type=int,
-        default=1000,
-        help="Liczba próbek zaburzających dla LIME (domyślnie: 1000)"
+        default=500,
+        help="Liczba próbek zaburzających dla LIME (domyślnie: 500)"
     )
     parser.add_argument(
         "--random-trials",

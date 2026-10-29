@@ -54,14 +54,14 @@ def main():
     parser.add_argument(
         "--samples", 
         type=int, 
-        default=100, 
-        help="Liczba próbek ze zbioru SST-2 do ewaluacji (domyślnie: 100)"
+        default=300, 
+        help="Liczba próbek ze zbioru SST-2 do ewaluacji (domyślnie: 300)"
     )
     parser.add_argument(
         "--model", 
         type=str, 
-        default="microsoft/phi-2", 
-        help="Nazwa lub ścieżka modelu HuggingFace (domyślnie: 'microsoft/phi-2')"
+        default="Qwen/Qwen2.5-7B", 
+        help="Nazwa lub ścieżka modelu HuggingFace (domyślnie: 'Qwen/Qwen2.5-7B')"
     )
     parser.add_argument(
         "--methods",
@@ -72,20 +72,20 @@ def main():
     parser.add_argument(
         "--max-evals", 
         type=int, 
-        default=2500, 
-        help="Maksymalna liczba ewaluacji dla permutacyjnego SHAP (domyślnie: 2500)"
+        default=1200, 
+        help="Maksymalna liczba ewaluacji dla permutacyjnego SHAP (domyślnie: 1200)"
     )
     parser.add_argument(
         "--ig-steps",
         type=int,
-        default=100,
-        help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 100)"
+        default=50,
+        help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 50)"
     )
     parser.add_argument(
         "--lime-samples",
         type=int,
-        default=1000,
-        help="Liczba próbek sąsiedztwa dla LIME (domyślnie: 1000)"
+        default=500,
+        help="Liczba próbek sąsiedztwa dla LIME (domyślnie: 500)"
     )
     parser.add_argument(
         "--no-filter-preserved",

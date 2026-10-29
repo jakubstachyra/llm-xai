@@ -62,10 +62,16 @@ class IntegratedGradientsExplainer(BaseExplainer):
         self.model_wrapper.forward_pass_count += 2
 
         # Numerical integration using Riemann sum over steps k/m (Sundararajan et al., 2017)
-        # Vectorized/batched integration to saturate GPU Tensor Cores (A100/L4)
+        # Dynamic backward micro-batching to prevent autograd activation OOM on 7B+ models
+        param_count = sum(p.numel() for p in self.model_wrapper.model.parameters()) if hasattr(self.model_wrapper, "model") else 7e9
+        is_large_model = param_count > 4e9  # e.g. Qwen-7B requires smaller backward batches than Phi-2 2.7B
+
         if self.model_wrapper.device == "cuda" and torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            ig_batch_size = 64 if total_mem >= 30 else (32 if total_mem >= 16 else 8)
+            if is_large_model:
+                ig_batch_size = 16 if total_mem >= 30 else (8 if total_mem >= 16 else 4)
+            else:
+                ig_batch_size = 32 if total_mem >= 30 else (16 if total_mem >= 16 else 8)
         else:
             ig_batch_size = 4
 
