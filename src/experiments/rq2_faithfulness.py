@@ -368,9 +368,14 @@ class RQ2FaithfulnessExperiment:
                 if samples_processed_in_this_run % 10 == 0:
                     flush_buffer()
                     live_hw_path = os.path.join(os.path.abspath(self.output_dir), "hardware_live_snapshot.json")
+                    live_hw_csv = os.path.join(os.path.abspath(self.output_dir), "hardware_timeline.csv")
                     try:
+                        snap = tracker.snapshot_stats(samples_processed_in_this_run)
                         with open(live_hw_path, "w", encoding="utf-8") as f_hw:
-                            json.dump(tracker.snapshot_stats(samples_processed_in_this_run), f_hw, indent=2)
+                            json.dump(snap, f_hw, indent=2)
+                        df_snap = pd.DataFrame([snap])
+                        write_hw_hdr = not os.path.exists(live_hw_csv) or os.path.getsize(live_hw_csv) == 0
+                        df_snap.to_csv(live_hw_csv, mode="a", header=write_hw_hdr, index=False)
                     except Exception:
                         pass
 
