@@ -6,11 +6,11 @@ Usage:
     # Pilot run (5 samples, fast methods):
     python scripts/run_rq2.py --samples 5 --methods occlusion,grad_x_input,ig
 
-    # Main production run (400 samples, all 5 methods, auto-checkpointing):
-    python scripts/run_rq2.py --samples 400 --methods occlusion,grad_x_input,ig,lime,shap --model microsoft/phi-2
+    # Main production run (both deletion and embedding_mask in a single pass!):
+    python scripts/run_rq2.py --samples 310 --operator both --methods occlusion,grad_x_input,ig,lime,shap --model Qwen/Qwen2.5-7B
 
-    # Operator embedding masking (100 samples):
-    python scripts/run_rq2.py --samples 100 --operator embedding_mask --output-dir results/rq2_embedding_mask
+    # Recompute only IG with mean baseline later if needed:
+    python scripts/run_rq2.py --samples 310 --operator both --methods ig --ig-baseline mean --overwrite-methods
 """
 
 import sys
@@ -62,8 +62,8 @@ def main():
         "--operator",
         type=str,
         default="deletion",
-        choices=["deletion", "embedding_mask"],
-        help="Operator zaburzający: 'deletion' (usuwanie słów) lub 'embedding_mask' (maskowanie embeddingów)"
+        choices=["deletion", "embedding_mask", "both"],
+        help="Operator zaburzający: 'deletion', 'embedding_mask' lub 'both' (oba operatory w jednym przebiegu bez podwójnego liczenia XAI)"
     )
     parser.add_argument(
         "--max-evals-shap",
@@ -76,6 +76,13 @@ def main():
         type=int,
         default=50,
         help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 50)"
+    )
+    parser.add_argument(
+        "--ig-baseline",
+        type=str,
+        default="zero",
+        choices=["zero", "mean", "pad"],
+        help="Wektor bazowy dla Integrated Gradients: 'zero' (domyślny, spójny z RQ1), 'mean' lub 'pad'"
     )
     parser.add_argument(
         "--lime-samples",
@@ -113,6 +120,11 @@ def main():
         help="Ignoruj istniejący checkpoint i zacznij eksperyment od nowa"
     )
     parser.add_argument(
+        "--overwrite-methods",
+        action="store_true",
+        help="Nadpisuje w istniejącym pliku checkpointa wyłącznie wybrane metody (--methods), pozostawiając pozostałe bez zmian."
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -135,7 +147,7 @@ def main():
         elif m in ["grad_x_input", "gradientxinput", "grad", "saliency"]:
             explainers.append(GradientXInputExplainer(model_wrapper))
         elif m in ["ig", "integrated_gradients", "integratedgradients"]:
-            explainers.append(IntegratedGradientsExplainer(model_wrapper, steps=args.ig_steps))
+            explainers.append(IntegratedGradientsExplainer(model_wrapper, steps=args.ig_steps, baseline_type=args.ig_baseline))
         elif m in ["lime"]:
             explainers.append(LIMEExplainer(model_wrapper, num_samples=args.lime_samples, seed=args.seed))
         elif m in ["shap"]:
@@ -156,20 +168,24 @@ def main():
         output_dir=args.output_dir
     )
 
+    overwrite_list = [e.explainer_name for e in explainers] if args.overwrite_methods else None
+
     experiment.run(
         num_samples=args.samples,
         seed=args.seed,
         resume=not args.no_resume,
-        max_run_samples=args.max_run_samples
+        max_run_samples=args.max_run_samples,
+        overwrite_methods=overwrite_list,
     )
 
     print("\n" + "=" * 60)
     print("  Eksperyment RQ2 zakończony sukcesem!")
-    print(f"  Wyniki zapisano w: {args.output_dir}")
-    print(f"  - Plik surowy: {os.path.join(args.output_dir, 'rq2_faithfulness_raw.csv')}")
-    print(f"  - Podsumowanie: {os.path.join(args.output_dir, 'rq2_faithfulness_summary.csv')}")
-    print(f"  - Tabela LaTeX: {os.path.join(args.output_dir, 'rq2_table.tex')}")
-    print(f"  - Wykresy (PNG/PDF): {os.path.join(args.output_dir, 'plots')}")
+    for op, d in experiment.op_dirs.items():
+        print(f"  [{op}] Wyniki zapisano w: {d}")
+        print(f"    - Plik surowy: {os.path.join(d, 'rq2_faithfulness_raw.csv')}")
+        print(f"    - Podsumowanie: {os.path.join(d, 'rq2_faithfulness_summary.csv')}")
+        print(f"    - Tabela LaTeX: {os.path.join(d, 'rq2_table.tex')}")
+        print(f"    - Wykresy (PNG/PDF): {os.path.join(d, 'plots')}")
     print("=" * 60 + "\n")
 
 

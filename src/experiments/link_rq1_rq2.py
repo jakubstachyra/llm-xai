@@ -47,6 +47,11 @@ def generate_joint_rq1_rq2_analysis(
     jaccard_col = "jaccard_k3_mean" if "jaccard_k3_mean" in df_rq1.columns else "top3_jaccard_mean"
 
     if "perturbation_name" in df_rq1.columns:
+        # Filter out control (noise floor) and identity perturbations (e.g., lowercase) if present
+        if "perturbation_category" in df_rq1.columns:
+            df_rq1 = df_rq1[df_rq1["perturbation_category"] != "control"]
+        df_rq1 = df_rq1[df_rq1["perturbation_name"] != "lowercase"]
+
         agg_dict = {
             "spearman_mean": "mean",
             kendall_col: "mean",
@@ -191,4 +196,18 @@ def generate_joint_rq1_rq2_analysis(
 
 
 if __name__ == "__main__":
-    generate_joint_rq1_rq2_analysis()
+    import argparse
+    parser = argparse.ArgumentParser(description="Joint RQ1 + RQ2 Analysis (RQ3)")
+    parser.add_argument("--rq1-dir", type=str, default="results/rq1_stability", help="Directory or CSV path for RQ1 results")
+    parser.add_argument("--rq2-dir", type=str, default="results/rq2_faithfulness", help="Directory or CSV path for RQ2 results")
+    parser.add_argument("--output-dir", type=str, default="results/rq3_joint_analysis", help="Output directory for RQ3 analysis")
+    args = parser.parse_args()
+
+    rq1_path = args.rq1_dir if args.rq1_dir.endswith(".csv") else os.path.join(args.rq1_dir, "rq1_stability_summary.csv")
+    rq2_path = args.rq2_dir if args.rq2_dir.endswith(".csv") else os.path.join(args.rq2_dir, "rq2_faithfulness_summary.csv")
+
+    generate_joint_rq1_rq2_analysis(
+        rq1_summary_path=rq1_path,
+        rq2_summary_path=rq2_path,
+        output_dir=args.output_dir
+    )
