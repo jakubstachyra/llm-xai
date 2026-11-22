@@ -230,11 +230,12 @@ def plot_rq2_comprehensiveness_curves(
     save_path: Optional[str] = None
 ):
     """
-    Plots the Comprehensiveness retention curves C(k) across perturbation steps k=1..5.
-    Compares all XAI methods against the Random Baseline with shaded standard error bands.
+    Plots the Comprehensiveness retention curves C(k) across perturbation steps k=1..K.
+    Compares all XAI methods against Random Baseline and mean Least-Important (LeRF) baseline
+    with shaded standard error bands.
     """
     fig, ax = plt.subplots(figsize=(8.5, 5), dpi=300)
-    
+
     colors = {
         "Occlusion": "#d95f02",
         "Gradient": "#7570b3",
@@ -243,41 +244,73 @@ def plot_rq2_comprehensiveness_curves(
         "SHAP": "#2b5c8f",
         "Random": "#777777"
     }
-    
+
     methods = sorted(df_raw["explainer_name"].unique())
-    k_cols = [c for c in df_raw.columns if c.startswith("c_prob_k")]
+    k_cols = sorted(
+        [c for c in df_raw.columns if c.startswith("c_prob_k")],
+        key=lambda c: int(c.split("_k")[-1]),
+    )
     k_vals = [int(c.split("_k")[-1]) for c in k_cols]
 
     for method in methods:
         sub = df_raw[df_raw["explainer_name"] == method]
-        means = [sub[col].mean() for col in k_cols]
-        sems = [sub[col].sem() for col in k_cols]
-        
+        means = np.array([sub[col].mean() for col in k_cols], dtype=float)
+        sems = np.array([sub[col].sem() for col in k_cols], dtype=float)
+
         color_key = next((k for k in colors if k in method), "Default")
         c = colors.get(color_key, "#333333")
         is_random = "random" in method.lower()
-        
+
         linestyle = "--" if is_random else "-"
         marker = "s" if is_random else "o"
         linewidth = 1.8 if is_random else 2.2
 
         ax.plot(
-            k_vals, 
-            means, 
-            label=method, 
-            color=c, 
-            linestyle=linestyle, 
-            marker=marker, 
+            k_vals,
+            means,
+            label=method,
+            color=c,
+            linestyle=linestyle,
+            marker=marker,
             linewidth=linewidth,
             alpha=0.9
         )
         ax.fill_between(
-            k_vals, 
-            np.array(means) - np.array(sems), 
-            np.array(means) + np.array(sems), 
-            color=c, 
+            k_vals,
+            means - np.nan_to_num(sems, nan=0.0),
+            means + np.nan_to_num(sems, nan=0.0),
+            color=c,
             alpha=0.15
         )
+
+    # Overlay mean Least-Important (LeRF) curve across non-random explainers if available
+    least_cols = sorted(
+        [c for c in df_raw.columns if c.startswith("c_least_prob_k")],
+        key=lambda c: int(c.split("_k")[-1]),
+    )
+    if least_cols:
+        non_rand = df_raw[df_raw["explainer_name"] != "Random Baseline"]
+        if len(non_rand) > 0 and non_rand[least_cols].notna().any().any():
+            least_k_vals = [int(c.split("_k")[-1]) for c in least_cols]
+            least_means = np.array([non_rand[col].mean() for col in least_cols], dtype=float)
+            least_sems = np.array([non_rand[col].sem() for col in least_cols], dtype=float)
+            ax.plot(
+                least_k_vals,
+                least_means,
+                label="Least-Important (mean LeRF)",
+                color="#222222",
+                linestyle=":",
+                marker="^",
+                linewidth=2.0,
+                alpha=0.9,
+            )
+            ax.fill_between(
+                least_k_vals,
+                least_means - np.nan_to_num(least_sems, nan=0.0),
+                least_means + np.nan_to_num(least_sems, nan=0.0),
+                color="#222222",
+                alpha=0.10,
+            )
 
     ax.set_xlabel("Liczba usuniętych najważniejszych słów ($k$)", fontsize=11)
     ax.set_ylabel("Comprehensiveness: Spadek prawdopodobieństwa $C(k)$", fontsize=11)
@@ -296,29 +329,157 @@ def plot_rq2_comprehensiveness_curves(
     return fig, ax
 
 
+def plot_rq2_morf_vs_lerf_and_sufficiency(
+    df_raw: pd.DataFrame,
+    save_path: Optional[str] = None
+):
+    """
+    Two-panel publication plot:
+      Left panel: MoRF Comprehensiveness C(k) (solid) vs LeRF Least-Important C_least(k) (dotted)
+                  for each XAI method plus Random Baseline (dashed).
+      Right panel: Sufficiency U(k) curves (lower is better) with SEM bands.
+    """
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(14, 5.2), dpi=300)
+
+    colors = {
+        "Occlusion": "#d95f02",
+        "Gradient": "#7570b3",
+        "Integrated": "#1b9e77",
+        "LIME": "#e7298a",
+        "SHAP": "#2b5c8f",
+        "Random": "#777777"
+    }
+
+    methods = sorted(df_raw["explainer_name"].unique())
+    c_cols = sorted(
+        [c for c in df_raw.columns if c.startswith("c_prob_k")],
+        key=lambda c: int(c.split("_k")[-1]),
+    )
+    least_cols = sorted(
+        [c for c in df_raw.columns if c.startswith("c_least_prob_k")],
+        key=lambda c: int(c.split("_k")[-1]),
+    )
+    u_cols = sorted(
+        [c for c in df_raw.columns if c.startswith("u_prob_k")],
+        key=lambda c: int(c.split("_k")[-1]),
+    )
+    k_vals = [int(c.split("_k")[-1]) for c in c_cols]
+
+    for method in methods:
+        sub = df_raw[df_raw["explainer_name"] == method]
+        color_key = next((k for k in colors if k in method), "Default")
+        c = colors.get(color_key, "#333333")
+        is_random = "random" in method.lower()
+
+        if c_cols:
+            c_means = np.array([sub[col].mean() for col in c_cols], dtype=float)
+            ax_l.plot(
+                k_vals,
+                c_means,
+                label=f"{method}" if is_random else f"{method} (MoRF)",
+                color=c,
+                linestyle="--" if is_random else "-",
+                marker="s" if is_random else "o",
+                linewidth=1.8 if is_random else 2.1,
+                alpha=0.92,
+            )
+
+        if not is_random and least_cols and sub[least_cols].notna().any().any():
+            l_means = np.array([sub[col].mean() for col in least_cols], dtype=float)
+            l_k_vals = [int(col.split("_k")[-1]) for col in least_cols]
+            ax_l.plot(
+                l_k_vals,
+                l_means,
+                label=f"{method} (LeRF)",
+                color=c,
+                linestyle=":",
+                marker="^",
+                linewidth=1.6,
+                alpha=0.78,
+            )
+
+        if u_cols:
+            u_means = np.array([sub[col].mean() for col in u_cols], dtype=float)
+            u_sems = np.array([sub[col].sem() for col in u_cols], dtype=float)
+            u_k_vals = [int(col.split("_k")[-1]) for col in u_cols]
+            ax_r.plot(
+                u_k_vals,
+                u_means,
+                label=method,
+                color=c,
+                linestyle="--" if is_random else "-",
+                marker="s" if is_random else "o",
+                linewidth=1.8 if is_random else 2.1,
+                alpha=0.92,
+            )
+            ax_r.fill_between(
+                u_k_vals,
+                u_means - np.nan_to_num(u_sems, nan=0.0),
+                u_means + np.nan_to_num(u_sems, nan=0.0),
+                color=c,
+                alpha=0.14,
+            )
+
+    ax_l.set_xlabel("Liczba usuniętych słów ($k$)", fontsize=10.5)
+    ax_l.set_ylabel("Spadek prawdopodobieństwa $C(k) \\uparrow$", fontsize=10.5)
+    ax_l.set_title("MoRF (najważniejsze) vs LeRF (najmniej ważne)", fontsize=11.5, fontweight="bold")
+    if k_vals:
+        ax_l.set_xticks(k_vals)
+    ax_l.grid(True, linestyle="--", alpha=0.5)
+    ax_l.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=7.8, ncol=2)
+
+    ax_r.set_xlabel("Liczba zachowanych najważniejszych słów ($k$)", fontsize=10.5)
+    ax_r.set_ylabel("Sufficiency: Spadek prawdopodobieństwa $U(k) \\downarrow$", fontsize=10.5)
+    ax_r.set_title("Krzywe Sufficiency $U(k)$ (im niżej, tym lepiej)", fontsize=11.5, fontweight="bold")
+    if u_cols:
+        ax_r.set_xticks([int(col.split("_k")[-1]) for col in u_cols])
+    ax_r.grid(True, linestyle="--", alpha=0.5)
+    ax_r.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=8.5)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight")
+        pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+        plt.savefig(pdf_path, bbox_inches="tight")
+
+    return fig, (ax_l, ax_r)
+
+
 def plot_rq2_aopc_comparison(
     df_summary: pd.DataFrame,
     save_path: Optional[str] = None
 ):
     """
-    Bar chart comparing AOPC Comprehensiveness vs AOPC Sufficiency for each method.
+    Bar chart comparing AOPC Comprehensiveness vs AOPC Sufficiency (and Least-Important AOPC when present).
     """
-    fig, ax = plt.subplots(figsize=(9, 4.5), dpi=300)
-    
+    fig, ax = plt.subplots(figsize=(9.5, 4.7), dpi=300)
+
     methods = df_summary["explainer_name"].tolist()
     x = np.arange(len(methods))
-    width = 0.35
-
     aopc_c = df_summary["aopc_c_prob_mean"].values
     aopc_u = df_summary["aopc_u_prob_mean"].values
 
-    ax.bar(x - width/2, aopc_c, width, label="Comprehensiveness ($AOPC_C$)", color="#2b5c8f", alpha=0.85)
-    ax.bar(x + width/2, aopc_u, width, label="Sufficiency ($AOPC_U$)", color="#e7298a", alpha=0.85)
+    has_least = (
+        "aopc_least_prob_mean" in df_summary.columns
+        and df_summary["aopc_least_prob_mean"].notna().any()
+    )
+
+    if has_least:
+        width = 0.26
+        aopc_least = df_summary["aopc_least_prob_mean"].values
+        ax.bar(x - width, aopc_c, width, label="Comprehensiveness ($AOPC_C \\uparrow$)", color="#2b5c8f", alpha=0.88)
+        ax.bar(x, aopc_u, width, label="Sufficiency ($AOPC_U \\downarrow$)", color="#e7298a", alpha=0.88)
+        ax.bar(x + width, aopc_least, width, label="Least-Important ($AOPC_{\\mathrm{least}} \\downarrow$)", color="#66a61e", alpha=0.88)
+    else:
+        width = 0.35
+        ax.bar(x - width / 2, aopc_c, width, label="Comprehensiveness ($AOPC_C$)", color="#2b5c8f", alpha=0.85)
+        ax.bar(x + width / 2, aopc_u, width, label="Sufficiency ($AOPC_U$)", color="#e7298a", alpha=0.85)
 
     ax.set_xticks(x)
     ax.set_xticklabels(methods, rotation=15, ha="right", fontsize=10)
     ax.set_ylabel("Wartość AOPC (Probability Drop)", fontsize=11)
-    ax.set_title("Porównanie wierności wyjaśnień: $AOPC_C$ vs $AOPC_U$", fontsize=12, fontweight="bold")
+    ax.set_title("Porównanie wierności wyjaśnień: $AOPC_C$, $AOPC_U$ i LeRF", fontsize=12, fontweight="bold")
     ax.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=9.5)
     ax.grid(True, axis="y", linestyle="--", alpha=0.5)
 
@@ -330,4 +491,68 @@ def plot_rq2_aopc_comparison(
         plt.savefig(pdf_path, bbox_inches="tight")
 
     return fig, ax
+
+
+def plot_rq2_operator_robustness(
+    df_del_sum: pd.DataFrame,
+    df_mask_sum: pd.DataFrame,
+    save_path: Optional[str] = None
+):
+    """
+    Two-panel bar chart comparing Deletion vs. Embedding Masking operators across XAI methods
+    for AOPC_C (left) and AOPC_U (right) with SEM error bars.
+    """
+    merged = pd.merge(
+        df_del_sum,
+        df_mask_sum,
+        on="explainer_name",
+        suffixes=("_del", "_mask"),
+    )
+    if len(merged) == 0:
+        return None, None
+
+    merged = merged.sort_values("aopc_c_prob_mean_del", ascending=False).reset_index(drop=True)
+    methods = merged["explainer_name"].tolist()
+    x = np.arange(len(methods))
+    width = 0.36
+
+    fig, (ax_l, ax_r) = plt.subplots(1, 2, figsize=(13.5, 4.8), dpi=300)
+
+    c_del = merged["aopc_c_prob_mean_del"].values
+    c_mask = merged["aopc_c_prob_mean_mask"].values
+    c_del_err = merged["aopc_c_prob_sem_del"].values if "aopc_c_prob_sem_del" in merged.columns else None
+    c_mask_err = merged["aopc_c_prob_sem_mask"].values if "aopc_c_prob_sem_mask" in merged.columns else None
+
+    ax_l.bar(x - width / 2, c_del, width, yerr=c_del_err, capsize=3, label="Discrete Deletion", color="#2b5c8f", alpha=0.88)
+    ax_l.bar(x + width / 2, c_mask, width, yerr=c_mask_err, capsize=3, label="Embedding Mask (zero)", color="#1b9e77", alpha=0.88)
+    ax_l.set_xticks(x)
+    ax_l.set_xticklabels(methods, rotation=18, ha="right", fontsize=9.5)
+    ax_l.set_ylabel("$\\mathrm{AOPC}_C \\uparrow$", fontsize=11)
+    ax_l.set_title("Odporność na operator: Comprehensiveness ($\\mathrm{AOPC}_C$)", fontsize=11.5, fontweight="bold")
+    ax_l.grid(True, axis="y", linestyle="--", alpha=0.5)
+    ax_l.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=9)
+
+    u_del = merged["aopc_u_prob_mean_del"].values
+    u_mask = merged["aopc_u_prob_mean_mask"].values
+    u_del_err = merged["aopc_u_prob_sem_del"].values if "aopc_u_prob_sem_del" in merged.columns else None
+    u_mask_err = merged["aopc_u_prob_sem_mask"].values if "aopc_u_prob_sem_mask" in merged.columns else None
+
+    ax_r.bar(x - width / 2, u_del, width, yerr=u_del_err, capsize=3, label="Discrete Deletion", color="#d95f02", alpha=0.88)
+    ax_r.bar(x + width / 2, u_mask, width, yerr=u_mask_err, capsize=3, label="Embedding Mask (zero)", color="#e7298a", alpha=0.88)
+    ax_r.set_xticks(x)
+    ax_r.set_xticklabels(methods, rotation=18, ha="right", fontsize=9.5)
+    ax_r.set_ylabel("$\\mathrm{AOPC}_U \\downarrow$", fontsize=11)
+    ax_r.set_title("Odporność na operator: Sufficiency ($\\mathrm{AOPC}_U$)", fontsize=11.5, fontweight="bold")
+    ax_r.grid(True, axis="y", linestyle="--", alpha=0.5)
+    ax_r.legend(frameon=True, facecolor="white", edgecolor="#cccccc", fontsize=9)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        plt.savefig(save_path, bbox_inches="tight")
+        pdf_path = os.path.splitext(save_path)[0] + ".pdf"
+        plt.savefig(pdf_path, bbox_inches="tight")
+
+    return fig, (ax_l, ax_r)
+
 

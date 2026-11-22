@@ -6,15 +6,35 @@ from typing import Optional, Tuple
 from scipy.stats import spearmanr, pearsonr
 
 
+def _clean_method_name(n: str) -> str:
+    n = str(n).strip()
+    if "occlusion" in n.lower():
+        return "Occlusion"
+    if "gradient" in n.lower() and "integrated" not in n.lower():
+        return "Gradient x Input"
+    if "integrated" in n.lower() or n.lower().startswith("ig"):
+        return "Integrated Gradients"
+    if "lime" in n.lower():
+        return "LIME"
+    if "shap" in n.lower():
+        return "SHAP"
+    return n
+
+
 def generate_joint_rq1_rq2_analysis(
     rq1_summary_path: str = "results/rq1_stability/rq1_stability_summary.csv",
     rq2_summary_path: str = "results/rq2_faithfulness/rq2_faithfulness_summary.csv",
-    output_dir: str = "results/rq3_joint_analysis"
+    output_dir: str = "results/rq3_joint_analysis",
+    rq1_raw_path: Optional[str] = None,
+    rq2_raw_path: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, str]:
     """
     Joint Analysis of Research Questions 1 and 2 (RQ3):
-    Evaluates whether explanation stability correlates with prediction faithfulness.
-    Produces joint summary CSV, LaTeX table for Chapter 4, and publication scatter plots.
+    Evaluates the relationship between explanation stability (RQ1) and prediction faithfulness (RQ2)
+    at TWO distinct levels (Section 4.5.2 of thesis):
+      1. Macro level (between methods): Pareto frontier & paired differences with true sample-level SEM.
+      2. Micro level (within-method across shared reviews): instance-level Spearman rho(S_{i,m}, G_{i,m})
+         with 95% cluster-bootstrap confidence intervals + ANCOVA-style repeated-measures correlation.
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -24,62 +44,85 @@ def generate_joint_rq1_rq2_analysis(
             f"and RQ2 ({rq2_summary_path}) have been evaluated."
         )
 
+    # Auto-detect raw CSV paths next to summaries when not explicitly passed
+    if rq1_raw_path is None:
+        cand1 = os.path.join(os.path.dirname(os.path.abspath(rq1_summary_path)), "rq1_stability_raw.csv")
+        if os.path.exists(cand1):
+            rq1_raw_path = cand1
+    if rq2_raw_path is None:
+        cand2 = os.path.join(os.path.dirname(os.path.abspath(rq2_summary_path)), "rq2_faithfulness_raw.csv")
+        if os.path.exists(cand2):
+            rq2_raw_path = cand2
+
     df_rq1 = pd.read_csv(rq1_summary_path)
     df_rq2 = pd.read_csv(rq2_summary_path)
+    clean_name = _clean_method_name
 
-    # Standardize explainer names for clean joining
-    def clean_name(n: str) -> str:
-        n = str(n).strip()
-        if "occlusion" in n.lower():
-            return "Occlusion"
-        if "gradient" in n.lower() and "integrated" not in n.lower():
-            return "Gradient x Input"
-        if "integrated" in n.lower():
-            return "Integrated Gradients"
-        if "lime" in n.lower():
-            return "LIME"
-        if "shap" in n.lower():
-            return "SHAP"
-        return n
+    # If raw RQ1 exists, compute true hierarchical sample-level stability S_{i,m} and true SEM across samples
+    rq1_sample_df: Optional[pd.DataFrame] = None
+    if rq1_raw_path and os.path.exists(rq1_raw_path):
+        raw1 = pd.read_csv(rq1_raw_path)
+        if "is_preserved" in raw1.columns:
+            raw1 = raw1[raw1["is_preserved"] == True].copy()
+        if "perturbation_category" in raw1.columns:
+            raw1 = raw1[raw1["perturbation_category"] != "control"].copy()
+        if "original_text" in raw1.columns and "perturbed_text" in raw1.columns:
+            raw1 = raw1[raw1["original_text"].astype(str).str.strip() != raw1["perturbed_text"].astype(str).str.strip()].copy()
+        raw1["clean_name"] = raw1["explainer_name"].apply(clean_name)
 
-    # Group RQ1 to overall mean per explainer
-    kendall_col = "kendall_mean" if "kendall_mean" in df_rq1.columns else "kendall_tau_mean"
-    jaccard_col = "jaccard_k3_mean" if "jaccard_k3_mean" in df_rq1.columns else "top3_jaccard_mean"
-
-    if "perturbation_name" in df_rq1.columns:
-        # Filter out control (noise floor) and identity perturbations (e.g., lowercase) if present
-        if "perturbation_category" in df_rq1.columns:
-            df_rq1 = df_rq1[df_rq1["perturbation_category"] != "control"]
-        df_rq1 = df_rq1[df_rq1["perturbation_name"] != "lowercase"]
-
-        agg_dict = {
-            "spearman_mean": "mean",
-            kendall_col: "mean",
-            jaccard_col: "mean",
-        }
-        if "spearman_std" in df_rq1.columns:
-            agg_dict["spearman_std"] = "mean"
-
-        rq1_agg = df_rq1.groupby("explainer_name").agg(agg_dict).reset_index()
-        # Rename to standardized names
-        rq1_agg = rq1_agg.rename(columns={
-            kendall_col: "kendall_tau_mean",
-            jaccard_col: "top3_jaccard_mean",
-        })
-        if "spearman_std" in rq1_agg.columns:
-            rq1_agg["spearman_sem"] = rq1_agg["spearman_std"] / np.sqrt(16)
-        else:
-            rq1_agg["spearman_sem"] = 0.0
+        # Hierarchical aggregation: first within category, then across categories per (sample_id, clean_name)
+        cat_col = "perturbation_category" if "perturbation_category" in raw1.columns else "perturbation_name"
+        per_cat = raw1.groupby(["sample_id", "clean_name", cat_col], as_index=False).agg(
+            spearman=("spearman", "mean"),
+            kendall=("kendall", "mean"),
+            jaccard_k3=("jaccard_k3", "mean"),
+        )
+        rq1_sample_df = per_cat.groupby(["sample_id", "clean_name"], as_index=False).agg(
+            spearman=("spearman", "mean"),
+            kendall=("kendall", "mean"),
+            jaccard_k3=("jaccard_k3", "mean"),
+        )
+        rq1_agg = rq1_sample_df.groupby("clean_name", as_index=False).agg(
+            spearman_mean=("spearman", "mean"),
+            spearman_sem=("spearman", "sem"),
+            kendall_tau_mean=("kendall", "mean"),
+            top3_jaccard_mean=("jaccard_k3", "mean"),
+            n_samples_rq1=("sample_id", "nunique"),
+        )
+        rq1_agg["explainer_name"] = rq1_agg["clean_name"]
     else:
-        rq1_agg = df_rq1.copy()
-        if "spearman_sem" not in rq1_agg.columns:
-            rq1_agg["spearman_sem"] = 0.0
+        # Fallback to summary CSV when raw file is absent
+        kendall_col = "kendall_mean" if "kendall_mean" in df_rq1.columns else "kendall_tau_mean"
+        jaccard_col = "jaccard_k3_mean" if "jaccard_k3_mean" in df_rq1.columns else "top3_jaccard_mean"
 
+        if "perturbation_name" in df_rq1.columns:
+            if "perturbation_category" in df_rq1.columns:
+                df_rq1 = df_rq1[df_rq1["perturbation_category"] != "control"]
+            df_rq1 = df_rq1[~df_rq1["perturbation_name"].isin(["lowercase", "add_period"])]
 
-    rq1_agg["clean_name"] = rq1_agg["explainer_name"].apply(clean_name)
+            agg_dict = {
+                "spearman_mean": "mean",
+                kendall_col: "mean",
+                jaccard_col: "mean",
+            }
+            if "spearman_std" in df_rq1.columns:
+                agg_dict["spearman_std"] = "mean"
+
+            rq1_agg = df_rq1.groupby("explainer_name").agg(agg_dict).reset_index()
+            rq1_agg = rq1_agg.rename(columns={
+                kendall_col: "kendall_tau_mean",
+                jaccard_col: "top3_jaccard_mean",
+            })
+            rq1_agg["spearman_sem"] = rq1_agg["spearman_std"] / np.sqrt(100) if "spearman_std" in rq1_agg.columns else 0.0
+        else:
+            rq1_agg = df_rq1.copy()
+            if "spearman_sem" not in rq1_agg.columns:
+                rq1_agg["spearman_sem"] = 0.0
+        rq1_agg["clean_name"] = rq1_agg["explainer_name"].apply(clean_name)
+
     df_rq2["clean_name"] = df_rq2["explainer_name"].apply(clean_name)
 
-    # Exclude Random Baseline from correlation calculation
+    # Exclude Random Baseline from explainer macro table
     df_rq2_explainers = df_rq2[df_rq2["clean_name"] != "Random Baseline"]
 
     joint_df = pd.merge(
@@ -88,6 +131,63 @@ def generate_joint_rq1_rq2_analysis(
         on="clean_name",
         suffixes=("_rq1", "_rq2")
     )
+
+    # Micro-level (instance-level) within-method correlation on shared sample_ids
+    micro_rows = []
+    rm_corr_r, rm_corr_p = np.nan, np.nan
+    if rq1_sample_df is not None and rq2_raw_path and os.path.exists(rq2_raw_path):
+        raw2 = pd.read_csv(rq2_raw_path)
+        raw2["clean_name"] = raw2["explainer_name"].apply(clean_name)
+        raw2 = raw2[raw2["clean_name"] != "Random Baseline"].copy()
+        merged_inst = pd.merge(
+            rq1_sample_df,
+            raw2[["sample_id", "clean_name", "aopc_c_prob", "gap_g", "harmonization_h", "num_words", "prediction_entropy", "is_correct"]],
+            on=["sample_id", "clean_name"],
+            how="inner",
+        ).dropna(subset=["spearman", "aopc_c_prob"])
+
+        if len(merged_inst) > 0:
+            merged_inst.to_csv(os.path.join(output_dir, "rq3_instance_level_merged.csv"), index=False)
+            rng = np.random.default_rng(42)
+            for m_name, grp in merged_inst.groupby("clean_name"):
+                s_vec = grp["spearman"].to_numpy()
+                f_vec = grp["gap_g"].to_numpy() if "gap_g" in grp.columns else grp["aopc_c_prob"].to_numpy()
+                n_inst = len(s_vec)
+                if n_inst >= 5 and np.std(s_vec) > 0 and np.std(f_vec) > 0:
+                    rho_val, p_val = spearmanr(s_vec, f_vec)
+                    # Bootstrap 95% CI
+                    boots = []
+                    for _ in range(1000):
+                        idx_b = rng.choice(n_inst, size=n_inst, replace=True)
+                        if np.std(s_vec[idx_b]) > 0 and np.std(f_vec[idx_b]) > 0:
+                            r_b, _ = spearmanr(s_vec[idx_b], f_vec[idx_b])
+                            if not np.isnan(r_b):
+                                boots.append(float(r_b))
+                    ci_lo = float(np.percentile(boots, 2.5)) if boots else float(rho_val)
+                    ci_hi = float(np.percentile(boots, 97.5)) if boots else float(rho_val)
+                else:
+                    rho_val, p_val, ci_lo, ci_hi = np.nan, np.nan, np.nan, np.nan
+                micro_rows.append({
+                    "clean_name": m_name,
+                    "n_shared_samples": n_inst,
+                    "micro_spearman_rho": float(rho_val) if not np.isnan(rho_val) else np.nan,
+                    "micro_p_value": float(p_val) if not np.isnan(p_val) else np.nan,
+                    "micro_ci95_low": ci_lo,
+                    "micro_ci95_high": ci_hi,
+                })
+
+            # Repeated-measures (within-method centered) correlation across all (sample, method) pairs
+            centered = merged_inst.copy()
+            centered["s_centered"] = centered["spearman"] - centered.groupby("clean_name")["spearman"].transform("mean")
+            f_col = "gap_g" if "gap_g" in centered.columns else "aopc_c_prob"
+            centered["f_centered"] = centered[f_col] - centered.groupby("clean_name")[f_col].transform("mean")
+            if len(centered) >= 6 and np.std(centered["s_centered"]) > 0 and np.std(centered["f_centered"]) > 0:
+                rm_corr_r, rm_corr_p = spearmanr(centered["s_centered"], centered["f_centered"])
+
+    if micro_rows:
+        micro_df = pd.DataFrame(micro_rows)
+        micro_df.to_csv(os.path.join(output_dir, "rq3_micro_correlations.csv"), index=False)
+        joint_df = pd.merge(joint_df, micro_df, on="clean_name", how="left")
 
     joint_csv_path = os.path.join(output_dir, "rq1_rq2_joint_summary.csv")
     joint_df.to_csv(joint_csv_path, index=False)
@@ -135,13 +235,18 @@ def generate_joint_rq1_rq2_analysis(
             color=c
         )
 
-    # Compute correlation if at least 3 methods present
-    if len(x_vals) >= 3:
-        r_pearson, p_pearson = pearsonr(x_vals, y_vals)
-        r_spearman, p_spearman = spearmanr(x_vals, y_vals)
+    # Compute descriptive macro correlation and within-method repeated-measures correlation
+    if not np.isnan(rm_corr_r):
         ax.set_title(
             f"Relacja między stabilnością a wiernością wyjaśnień (RQ3)\n"
-            f"Korelacja Pearsona: r = {r_pearson:+.2f} (p = {p_pearson:.3f})",
+            f"Korelacja wewnątrz-metodowa (po próbkach): $\\rho_{{RM}} = {rm_corr_r:+.2f}$ ($p = {rm_corr_p:.3f}$)",
+            fontsize=11.5,
+            fontweight="bold"
+        )
+    elif len(x_vals) >= 3:
+        r_pearson, _ = pearsonr(x_vals, y_vals)
+        ax.set_title(
+            f"Mapa kompromisu stabilność–wierność wyjaśnień (RQ3, opisowe $r = {r_pearson:+.2f}$)",
             fontsize=11.5,
             fontweight="bold"
         )

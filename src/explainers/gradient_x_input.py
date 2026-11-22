@@ -14,38 +14,32 @@ class GradientXInputExplainer(BaseExplainer):
     Requires only 1 backward pass, operates directly on the true input distribution,
     and avoids the numerical instability of path integration in deep LayerNorm architectures.
     """
-    def __init__(self, model_wrapper, target_mode: Literal["logit_diff", "logit"] = "logit"):
+    def __init__(self, model_wrapper, target_mode: Literal["logit_diff", "logit"] = "logit_diff"):
         super().__init__(model_wrapper)
         self.target_mode = target_mode
 
-    def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
+    def explain(
+        self,
+        text: str,
+        target_class: Optional[int] = None,
+        baseline_prob: Optional[float] = None,
+    ) -> AttributionResult:
         start_time = time.time()
 
-        prompt = self.model_wrapper.format_prompt(text)
-        input_ids = self.model_wrapper.tokenizer.encode(
-            prompt,
-            return_tensors="pt"
-        ).to(self.model_wrapper.device)
-
-        # Determine target class and baseline probability
-        _, probs = self.model_wrapper.predict_single(text)
-        if target_class is None:
-            target_class = int(np.argmax(probs))
-
-        baseline_prob = float(probs[target_class])
-        target_token_id = self.model_wrapper.target_token_ids[target_class]
+        input_ids = self.model_wrapper.encode_prompt(text, return_tensors="pt")
+        target_class, baseline_prob = self._resolve_target(text, target_class, baseline_prob)
 
         # Get input embeddings and enable gradient tracking
         embedding_layer = self.model_wrapper.model.get_input_embeddings()
         input_embeds = embedding_layer(input_ids).detach().clone().requires_grad_(True)
 
-        # Forward pass
-        outputs = self.model_wrapper.model(inputs_embeds=input_embeds)
-        if self.target_mode == "logit_diff" and len(self.model_wrapper.target_token_ids) >= 2:
-            other_token_id = self.model_wrapper.target_token_ids[1 - int(target_class)]
-            target_score = outputs.logits[0, -1, target_token_id].to(torch.float32) - outputs.logits[0, -1, other_token_id].to(torch.float32)
+        # Forward pass (only last-position 2-class target logits)
+        target_logits = self.model_wrapper.forward_target_logits(inputs_embeds=input_embeds)  # (1, 2)
+        if self.target_mode == "logit_diff" and target_logits.shape[-1] >= 2:
+            other_class = 1 - int(target_class)
+            target_score = target_logits[0, target_class].to(torch.float32) - target_logits[0, other_class].to(torch.float32)
         else:
-            target_score = outputs.logits[0, -1, target_token_id].to(torch.float32)
+            target_score = target_logits[0, target_class].to(torch.float32)
 
         # Backward pass
         grad = torch.autograd.grad(target_score, input_embeds)[0]  # shape: (1, seq_len, hidden_dim)
@@ -65,5 +59,6 @@ class GradientXInputExplainer(BaseExplainer):
             target_class=target_class,
             execution_time=execution_time,
             explainer_name="Gradient x Input",
-            baseline_prob=baseline_prob
+            baseline_prob=baseline_prob,
+            metadata={"target_mode": self.target_mode},
         )

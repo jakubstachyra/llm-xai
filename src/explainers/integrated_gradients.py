@@ -27,7 +27,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
         self,
         model_wrapper,
         steps: int = 25,
-        baseline_type: Literal["mean", "pad", "zero"] = "zero",
+        baseline_type: Literal["mean", "pad", "zero"] = "mean",
         target_mode: Optional[Literal["logit_diff", "logit"]] = None,
         mask_prompt_template: Optional[bool] = None,
         quadrature: Optional[Literal["midpoint", "riemann_right", "trapezoid"]] = None,
@@ -35,16 +35,33 @@ class IntegratedGradientsExplainer(BaseExplainer):
         super().__init__(model_wrapper)
         self.steps = steps
         self.baseline_type = baseline_type
-        # When baseline_type == "zero", default to standard IG settings used in RQ1 for consistency;
-        # when baseline_type == "mean" (or "pad"), enable LayerNorm-stabilized settings by default.
+        # Default to LayerNorm-stabilized settings ('mean' baseline, 'logit_diff', template freezing, 'midpoint');
+        # when baseline_type == "zero", preserve legacy settings unless explicitly overridden.
         is_stabilized = (baseline_type != "zero")
         self.target_mode = target_mode if target_mode is not None else ("logit_diff" if is_stabilized else "logit")
         self.mask_prompt_template = mask_prompt_template if mask_prompt_template is not None else is_stabilized
         self.quadrature = quadrature if quadrature is not None else ("midpoint" if is_stabilized else "riemann_right")
         self._cached_mean_embed: Optional[torch.Tensor] = None
 
+        # Precompute backward micro-batch size once from cached param_count
+        param_count = getattr(self.model_wrapper, "param_count", None)
+        if param_count is None:
+            param_count = sum(p.numel() for p in self.model_wrapper.model.parameters()) if hasattr(self.model_wrapper, "model") else 7e9
+        is_large_model = param_count > 4e9
+        if self.model_wrapper.device == "cuda" and torch.cuda.is_available():
+            total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            if is_large_model:
+                self.ig_batch_size = 32 if total_mem >= 30 else (16 if total_mem >= 16 else 8)
+            else:
+                self.ig_batch_size = 64 if total_mem >= 30 else (32 if total_mem >= 16 else 16)
+        else:
+            self.ig_batch_size = 4
+
     def _find_review_span(self, prompt: str, text: str, num_tokens: int) -> Tuple[int, int]:
         """Finds [start, end) token indices corresponding to the review text inside the prompt."""
+        if hasattr(self.model_wrapper, "find_review_span"):
+            s, e, _ = self.model_wrapper.find_review_span(text, num_tokens=num_tokens)
+            return s, e
         prefix = "Review: "
         text_start = len(prefix)
         text_end = len(prefix) + len(text)
@@ -77,16 +94,29 @@ class IntegratedGradientsExplainer(BaseExplainer):
             pad_id = self.model_wrapper.tokenizer.pad_token_id
             baseline_ids = torch.full_like(input_ids, fill_value=pad_id)
             return embedding_layer(baseline_ids)
-        else:  # "mean": expectation over vocabulary embeddings (norm-preserving, neutral semantics)
+        else:  # "mean": norm-matched expectation over vocabulary embeddings (avoids RMSNorm 1/alpha singularity)
             if self._cached_mean_embed is None or self._cached_mean_embed.device != input_embeds.device:
                 with torch.no_grad():
-                    w = embedding_layer.weight.detach()
-                    mean_vec = w.to(torch.float32).mean(dim=0).to(input_embeds.dtype)
-                    self._cached_mean_embed = mean_vec.view(1, 1, -1)
+                    w = embedding_layer.weight.detach().to(torch.float32)
+                    mean_vec = w.mean(dim=0)
+                    avg_token_norm = w.norm(dim=-1).mean()
+                    mean_vec_norm = mean_vec.norm().clamp(min=1e-8)
+                    scaled_mean_vec = (mean_vec * (avg_token_norm / mean_vec_norm)).to(input_embeds.dtype)
+                    self._cached_mean_embed = scaled_mean_vec.view(1, 1, -1)
             return self._cached_mean_embed.expand_as(input_embeds).clone()
 
     def _compute_target_objective(self, logits: torch.Tensor, target_class: int) -> torch.Tensor:
-        """Computes scalar/batched target score from final-position logits."""
+        """
+        Computes scalar/batched target score.
+        Supports both compact 2-class target logits (B, 2) from forward_target_logits
+        and full vocabulary logits (B, L, V) for backward compatibility.
+        """
+        if logits.ndim == 2 and logits.shape[-1] == len(self.model_wrapper.target_token_ids):
+            if self.target_mode == "logit_diff" and logits.shape[-1] >= 2:
+                other_class = 1 - int(target_class)
+                return logits[:, target_class].to(torch.float32) - logits[:, other_class].to(torch.float32)
+            return logits[:, target_class].to(torch.float32)
+
         target_token_id = self.model_wrapper.target_token_ids[target_class]
         if self.target_mode == "logit_diff" and len(self.model_wrapper.target_token_ids) >= 2:
             other_class = 1 - int(target_class)
@@ -107,25 +137,16 @@ class IntegratedGradientsExplainer(BaseExplainer):
         baseline_embeds[:, rev_start:rev_end, :] = ref_embeds[:, rev_start:rev_end, :]
         return baseline_embeds
 
-    def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
+    def explain(
+        self,
+        text: str,
+        target_class: Optional[int] = None,
+        baseline_prob: Optional[float] = None,
+    ) -> AttributionResult:
         start_time = time.time()
 
-        prompt = self.model_wrapper.format_prompt(text)
-        if getattr(self.model_wrapper.tokenizer, "is_fast", False):
-            input_ids = self.model_wrapper.tokenizer(
-                prompt, return_tensors="pt", add_special_tokens=False
-            ).input_ids.to(self.model_wrapper.device)
-        else:
-            input_ids = self.model_wrapper.tokenizer.encode(
-                prompt, return_tensors="pt"
-            ).to(self.model_wrapper.device)
-
-        # Determine target class and baseline probability
-        _, probs = self.model_wrapper.predict_single(text)
-        if target_class is None:
-            target_class = int(np.argmax(probs))
-
-        baseline_prob = float(probs[target_class])
+        input_ids = self.model_wrapper.encode_prompt(text, return_tensors="pt")
+        target_class, baseline_prob = self._resolve_target(text, target_class, baseline_prob)
 
         # Get input and baseline embeddings
         embedding_layer = self.model_wrapper.model.get_input_embeddings()
@@ -136,27 +157,17 @@ class IntegratedGradientsExplainer(BaseExplainer):
         # Accumulate gradients in float32 to avoid bfloat16 precision loss across steps and hidden_dim
         total_grads = torch.zeros_like(input_embeds, dtype=torch.float32)
 
-        # Compute true endpoint objectives F(x') and F(x) without gradient
-        with torch.no_grad():
-            baseline_outputs = self.model_wrapper.model(inputs_embeds=baseline_embeds)
-            baseline_score = float(self._compute_target_objective(baseline_outputs.logits, target_class).item())
-            input_outputs = self.model_wrapper.model(inputs_embeds=input_embeds)
-            input_score = float(self._compute_target_objective(input_outputs.logits, target_class).item())
-            del baseline_outputs, input_outputs
+        # Compute true endpoint objectives F(x') and F(x) in a single batched forward pass without full logits
+        with torch.inference_mode():
+            endpoints = torch.cat([baseline_embeds, input_embeds], dim=0)  # (2, seq_len, hidden_dim)
+            endpoint_logits = self.model_wrapper.forward_target_logits(inputs_embeds=endpoints)
+            endpoint_scores = self._compute_target_objective(endpoint_logits, target_class)
+            baseline_score = float(endpoint_scores[0].item())
+            input_score = float(endpoint_scores[1].item())
+            del endpoints, endpoint_logits, endpoint_scores
         self.model_wrapper.forward_pass_count += 2
 
-        # Dynamic backward micro-batching to prevent autograd activation OOM on 7B+ models
-        param_count = sum(p.numel() for p in self.model_wrapper.model.parameters()) if hasattr(self.model_wrapper, "model") else 7e9
-        is_large_model = param_count > 4e9
-
-        if self.model_wrapper.device == "cuda" and torch.cuda.is_available():
-            total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            if is_large_model:
-                ig_batch_size = 16 if total_mem >= 30 else (8 if total_mem >= 16 else 4)
-            else:
-                ig_batch_size = 32 if total_mem >= 30 else (16 if total_mem >= 16 else 8)
-        else:
-            ig_batch_size = 4
+        ig_batch_size = self.ig_batch_size
 
         # Quadrature nodes and weights on [0, 1]
         if self.quadrature == "midpoint":
@@ -190,14 +201,14 @@ class IntegratedGradientsExplainer(BaseExplainer):
             interp_f32 = base_f32 + chunk_alphas.view(B, 1, 1) * delta_f32
             interpolated = interp_f32.to(input_embeds.dtype).detach().clone().requires_grad_(True)
 
-            outputs = self.model_wrapper.model(inputs_embeds=interpolated)
-            target_scores = self._compute_target_objective(outputs.logits, target_class)
+            target_logits = self.model_wrapper.forward_target_logits(inputs_embeds=interpolated)
+            target_scores = self._compute_target_objective(target_logits, target_class)
 
             grad = torch.autograd.grad(target_scores.sum(), interpolated)[0]
             weighted_grad = grad.to(torch.float32) * chunk_weights.view(B, 1, 1)
             total_grads += weighted_grad.sum(dim=0, keepdim=True).detach()
 
-            del interpolated, interp_f32, outputs, target_scores, grad, weighted_grad
+            del interpolated, interp_f32, target_logits, target_scores, grad, weighted_grad
             self.model_wrapper.forward_pass_count += B
             self.model_wrapper.increment_backward_passes(B)
 

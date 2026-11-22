@@ -13,8 +13,22 @@ class TextPerturber:
     # =========================================================================
     @staticmethod
     def lowercase(text: str) -> str:
-        """Converts text to lowercase."""
-        return text.lower()
+        """
+        Converts text to lowercase; if already lowercase (as in SST-2), applies
+        Title-Case capitalization to initial words so the surface perturbation is never a no-op.
+        """
+        lowered = text.lower()
+        if lowered.strip() != text.strip():
+            return lowered
+        words = text.strip().split()
+        if not words:
+            return text
+        words[0] = words[0].capitalize()
+        for i in range(1, len(words)):
+            if len(words[i]) >= 4 and words[i].isalpha():
+                words[i] = words[i].capitalize()
+                break
+        return " ".join(words)
 
     @staticmethod
     def uppercase(text: str) -> str:
@@ -23,16 +37,29 @@ class TextPerturber:
 
     @staticmethod
     def add_punctuation(text: str, punct: str = ".") -> str:
-        """Ensures text ends with a terminating period."""
+        """
+        Modifies terminal punctuation in a meaning-preserving way:
+        appends a period if missing, or swaps terminal '.' <-> '...' / '!' so it is never a no-op.
+        """
         text_clean = text.strip()
-        if text_clean.endswith((".", "!", "?")):
-            return text_clean
-        return f"{text_clean}{punct}"
+        if not text_clean.endswith((".", "!", "?")):
+            return f"{text_clean}{punct}"
+        if text_clean.endswith("..."):
+            return text_clean[:-3].rstrip() + "."
+        if text_clean.endswith("."):
+            return text_clean[:-1].rstrip() + " ..."
+        if text_clean.endswith("!"):
+            return text_clean[:-1].rstrip() + "."
+        return text_clean + punct
 
     @staticmethod
     def remove_punctuation(text: str) -> str:
         """Removes internal and trailing punctuation marks."""
-        return re.sub(r'[^\w\s]', '', text)
+        cleaned = re.sub(r'[^\w\s]', '', text)
+        cleaned = " ".join(cleaned.split())
+        if cleaned.strip() == text.strip():
+            return f"{text.strip()} ,"
+        return cleaned
 
     @staticmethod
     def double_space(text: str) -> str:
@@ -52,32 +79,33 @@ class TextPerturber:
     @staticmethod
     def typo_swap(text: str) -> str:
         """
-        Simulates an innocent keyboard typo by swapping two adjacent internal
+        Simulates an innocent keyboard typo by swapping two adjacent DISTINCT internal
         characters in a neutral word of length >= 5 (CheckList INV standard).
-        Safely ignores attached punctuation.
+        Safely ignores attached punctuation and avoids swapping identical letters (e.g. 'oo').
         """
         words = text.strip().split()
-        # Find candidate words with length >= 5 that are not sentiment keywords
         sentiment_keywords = {"great", "terrible", "awful", "wonderful", "bad", "good", "boring", "worst", "best"}
         for idx, word in enumerate(words):
             clean_word = re.sub(r'[^\w]', '', word)
             if len(clean_word) >= 5 and clean_word.lower() not in sentiment_keywords:
-                # Swap internal characters at positions 1 and 2
                 w_list = list(clean_word)
-                w_list[1], w_list[2] = w_list[2], w_list[1]
-                swapped = "".join(w_list)
-                words[idx] = word.replace(clean_word, swapped, 1)
-                return " ".join(words)
-        # Fallback: if no 5-letter word found, swap characters in the clean part of the longest word
-        if words:
-            longest_idx = max(range(len(words)), key=lambda i: len(re.sub(r'[^\w]', '', words[i])))
-            word = words[longest_idx]
+                for pos in range(1, len(w_list) - 1):
+                    if w_list[pos].lower() != w_list[pos + 1].lower():
+                        w_list[pos], w_list[pos + 1] = w_list[pos + 1], w_list[pos]
+                        swapped = "".join(w_list)
+                        words[idx] = word.replace(clean_word, swapped, 1)
+                        return " ".join(words)
+        # Fallback: find any word with at least 2 distinct adjacent characters
+        for idx in sorted(range(len(words)), key=lambda i: len(re.sub(r'[^\w]', '', words[i])), reverse=True):
+            word = words[idx]
             clean_word = re.sub(r'[^\w]', '', word)
-            if len(clean_word) >= 2:
-                w_list = list(clean_word)
-                w_list[0], w_list[1] = w_list[1], w_list[0]
-                swapped = "".join(w_list)
-                words[longest_idx] = word.replace(clean_word, swapped, 1)
+            w_list = list(clean_word)
+            for pos in range(len(w_list) - 1):
+                if w_list[pos].lower() != w_list[pos + 1].lower():
+                    w_list[pos], w_list[pos + 1] = w_list[pos + 1], w_list[pos]
+                    swapped = "".join(w_list)
+                    words[idx] = word.replace(clean_word, swapped, 1)
+                    return " ".join(words)
         return " ".join(words)
 
     # =========================================================================

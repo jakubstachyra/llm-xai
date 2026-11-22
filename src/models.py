@@ -3,7 +3,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 import torch
 import transformers
 import numpy as np
-from typing import List, Tuple, Dict, Union
+from typing import List, Tuple, Dict, Union, Optional
 
 class SentimentCausalLM:
     """
@@ -14,7 +14,8 @@ class SentimentCausalLM:
         self, 
         model_name: str = "microsoft/phi-2", 
         torch_dtype: torch.dtype = torch.bfloat16,
-        device: str = None
+        device: str = None,
+        sub_batch_size: Optional[int] = None
     ):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -50,6 +51,9 @@ class SentimentCausalLM:
             trust_remote_code=True
         ).to(self.device)
         self.model.eval()
+        # Freeze model weights so autograd does not retain intermediate activations for dL/dW
+        # during torch.autograd.grad(..., inputs_embeds) in IG and Gradient x Input (~1.5-2 GB VRAM saved on 7B-8B).
+        self.model.requires_grad_(False)
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.pad_token_id = self.tokenizer.pad_token_id
 
@@ -64,6 +68,22 @@ class SentimentCausalLM:
         
         self.target_token_ids = [neg_id, pos_id] # 0: negative, 1: positive
         print(f"Target token IDs -> Negative: {neg_id} ('{self.tokenizer.decode([neg_id])}'), Positive: {pos_id} ('{self.tokenizer.decode([pos_id])}')")
+
+        # Cache parameter count and default sub-batch size once
+        self.param_count = sum(p.numel() for p in self.model.parameters())
+        if sub_batch_size is not None:
+            self.default_sub_batch_size = int(sub_batch_size)
+        elif self.device == "cuda" and torch.cuda.is_available():
+            total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            self.default_sub_batch_size = 128 if total_mem >= 30 else (64 if total_mem >= 16 else 32)
+        else:
+            self.default_sub_batch_size = 8
+
+        # Precompute prefix/suffix token IDs for template span finding
+        self._prefix_str = "Review: "
+        self._suffix_str = "\nSentiment:"
+        self._prefix_ids = self.tokenizer.encode(self._prefix_str, add_special_tokens=False)
+        self._suffix_ids = self.tokenizer.encode(self._suffix_str, add_special_tokens=False)
 
         # Hardware-invariant complexity tracking
         self.forward_pass_count = 0
@@ -94,6 +114,83 @@ class SentimentCausalLM:
         """Formats review text into a sentiment classification prompt."""
         return f"Review: {text}\nSentiment:"
 
+    def encode_prompt(self, text: str, return_tensors: Optional[str] = "pt") -> Union[torch.Tensor, np.ndarray, List[int]]:
+        """
+        Canonical tokenizer entrypoint for a single review text.
+        Always sets add_special_tokens=False so token indices match extract_word_units across all models.
+        """
+        prompt = self.format_prompt(text)
+        encoded = self.tokenizer(prompt, return_tensors=return_tensors, add_special_tokens=False)
+        input_ids = encoded["input_ids"]
+        if return_tensors == "pt":
+            return input_ids.to(self.device)
+        return input_ids
+
+    def find_review_span(self, text: str, num_tokens: Optional[int] = None) -> Tuple[int, int, List[int]]:
+        """
+        Finds the [start, end) token span of the review inside the formatted prompt
+        along with the full token ID list (with add_special_tokens=False).
+        """
+        prompt = self.format_prompt(text)
+        text_start = len(self._prefix_str)
+        text_end = text_start + len(text)
+
+        if getattr(self.tokenizer, "is_fast", False):
+            try:
+                encoded = self.tokenizer(prompt, return_offsets_mapping=True, add_special_tokens=False)
+                input_ids = list(encoded["input_ids"])
+                n_tok = len(input_ids)
+                matching = [
+                    i for i, (s, e) in enumerate(encoded["offset_mapping"])
+                    if max(s, text_start) < min(e, text_end)
+                ]
+                if matching and (num_tokens is None or n_tok == num_tokens):
+                    return matching[0], matching[-1] + 1, input_ids
+            except Exception:
+                pass
+
+        input_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+        n_tok = len(input_ids) if num_tokens is None else num_tokens
+        p_len = len(self._prefix_ids)
+        s_len = len(self._suffix_ids)
+        if n_tok > p_len + s_len:
+            return p_len, n_tok - s_len, input_ids
+        return 0, n_tok, input_ids
+
+    def forward_target_logits(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Computes logits of shape (batch_size, 2) for [negative, positive] at the final token position
+        WITHOUT materializing full-vocabulary logits across all sequence positions (B, L, V).
+        Saves ~2-3 GB of VRAM per batch on 152k-vocab models (Qwen2.5) and speeds up autograd.
+        """
+        base = getattr(self.model, "model", None) or getattr(self.model, "transformer", None)
+        out_emb = self.model.get_output_embeddings()
+        if base is not None and out_emb is not None and hasattr(out_emb, "weight"):
+            base_out = base(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+            )
+            last_hidden = base_out.last_hidden_state[:, -1, :]  # (B, H)
+            target_w = out_emb.weight[self.target_token_ids]     # (2, H)
+            target_b = out_emb.bias[self.target_token_ids] if getattr(out_emb, "bias", None) is not None else None
+            return torch.nn.functional.linear(last_hidden, target_w, target_b)
+
+        outputs = self.model(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            use_cache=False,
+        )
+        return outputs.logits[:, -1, self.target_token_ids]
+
     def predict_single(self, text: str) -> Tuple[int, np.ndarray]:
         """
         Predicts sentiment for a single text.
@@ -101,16 +198,13 @@ class SentimentCausalLM:
             predicted_class (0 for negative, 1 for positive),
             probabilities array [p_neg, p_pos]
         """
-        prompt = self.format_prompt(text)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        input_ids = self.encode_prompt(text, return_tensors="pt")
         self.forward_pass_count += 1
-        self.forward_token_count += int(inputs["input_ids"].shape[1])
+        self.forward_token_count += int(input_ids.shape[1])
         
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-            next_token_logits = outputs.logits[0, -1, :]
-            target_logits = next_token_logits[self.target_token_ids]
-            probs = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
+        with torch.inference_mode():
+            target_logits = self.forward_target_logits(input_ids=input_ids)[0]
+            probs = torch.softmax(target_logits.float(), dim=-1).cpu().numpy()
             
         pred_class = int(np.argmax(probs))
         return pred_class, probs
@@ -119,14 +213,9 @@ class SentimentCausalLM:
         """
         Memory-safe batch prediction function compatible with SHAP and Occlusion.
         Takes 1D or 2D array of token IDs, returns probabilities [p_neg, p_pos].
-        Dynamically adjusts sub_batch_size to fully utilize high-VRAM GPUs (A100/L4).
         """
         if sub_batch_size is None:
-            if self.device == "cuda" and torch.cuda.is_available():
-                total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-                sub_batch_size = 128 if total_mem >= 30 else (64 if total_mem >= 16 else 16)
-            else:
-                sub_batch_size = 8
+            sub_batch_size = self.default_sub_batch_size
         if len(token_ids_batch.shape) == 1:
             token_ids_batch = np.expand_dims(token_ids_batch, axis=0)
             
@@ -135,36 +224,37 @@ class SentimentCausalLM:
         self.forward_token_count += int(token_ids_batch.size)
 
         if num_samples <= sub_batch_size:
-            token_ids_tensor = torch.tensor(token_ids_batch, dtype=torch.long, device=self.device)
+            token_ids_tensor = torch.as_tensor(token_ids_batch, dtype=torch.long, device=self.device)
             attention_mask = (token_ids_tensor != self.pad_token_id).long()
-            with torch.no_grad():
-                outputs = self.model(input_ids=token_ids_tensor, attention_mask=attention_mask)
-                next_token_logits = outputs.logits[:, -1, :]
-                target_logits = next_token_logits[:, self.target_token_ids]
-                probs = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
-            del token_ids_tensor, attention_mask, outputs, next_token_logits, target_logits
+            with torch.inference_mode():
+                target_logits = self.forward_target_logits(input_ids=token_ids_tensor, attention_mask=attention_mask)
+                probs = torch.softmax(target_logits.float(), dim=-1).cpu().numpy()
+            del token_ids_tensor, attention_mask, target_logits
             return probs
 
         probs_list = []
         for i in range(0, num_samples, sub_batch_size):
             chunk = token_ids_batch[i:i + sub_batch_size]
-            token_ids_tensor = torch.tensor(chunk, dtype=torch.long, device=self.device)
+            token_ids_tensor = torch.as_tensor(chunk, dtype=torch.long, device=self.device)
             attention_mask = (token_ids_tensor != self.pad_token_id).long()
-            with torch.no_grad():
-                outputs = self.model(input_ids=token_ids_tensor, attention_mask=attention_mask)
-                next_token_logits = outputs.logits[:, -1, :]
-                target_logits = next_token_logits[:, self.target_token_ids]
-                p = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
+            with torch.inference_mode():
+                target_logits = self.forward_target_logits(input_ids=token_ids_tensor, attention_mask=attention_mask)
+                p = torch.softmax(target_logits.float(), dim=-1).cpu().numpy()
                 probs_list.append(p)
-            del token_ids_tensor, attention_mask, outputs, next_token_logits, target_logits
+            del token_ids_tensor, attention_mask, target_logits
             
         return np.vstack(probs_list)
 
-    def predict_texts_batch(self, texts: List[str], sub_batch_size: int = 16) -> np.ndarray:
+    def predict_texts_batch(self, texts: List[str], sub_batch_size: int = None) -> np.ndarray:
         """
         Batched prediction for raw texts with automatic left-padding and attention mask.
         Returns array of shape (len(texts), 2) with probabilities [p_neg, p_pos].
         """
+        if not texts:
+            return np.zeros((0, 2), dtype=np.float32)
+        if sub_batch_size is None:
+            sub_batch_size = self.default_sub_batch_size
+
         prompts = [self.format_prompt(t) for t in texts]
         num_samples = len(prompts)
         probs_list = []
@@ -174,19 +264,21 @@ class SentimentCausalLM:
             encoded = self.tokenizer(
                 chunk, 
                 padding=True, 
+                add_special_tokens=False,
                 return_tensors="pt"
             ).to(self.device)
             
             self.forward_pass_count += len(chunk)
             self.forward_token_count += int(encoded["input_ids"].numel())
 
-            with torch.no_grad():
-                outputs = self.model(**encoded)
-                next_token_logits = outputs.logits[:, -1, :]
-                target_logits = next_token_logits[:, self.target_token_ids]
-                p = torch.softmax(target_logits, dim=-1).float().cpu().numpy()
+            with torch.inference_mode():
+                target_logits = self.forward_target_logits(
+                    input_ids=encoded["input_ids"],
+                    attention_mask=encoded["attention_mask"]
+                )
+                p = torch.softmax(target_logits.float(), dim=-1).cpu().numpy()
                 probs_list.append(p)
-            del encoded, outputs, next_token_logits, target_logits
+            del encoded, target_logits
 
         return np.vstack(probs_list)
 
@@ -213,11 +305,9 @@ class SentimentCausalLM:
         self.forward_pass_count += int(inputs_embeds.shape[0])
         self.forward_token_count += int(inputs_embeds.shape[0] * inputs_embeds.shape[1])
 
-        with torch.no_grad():
-            outputs = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
-            next_token_logits = outputs.logits[:, -1, :]
-            target_logits = next_token_logits[:, self.target_token_ids]
-            probs = torch.softmax(target_logits, dim=-1).float()
+        with torch.inference_mode():
+            target_logits = self.forward_target_logits(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+            probs = torch.softmax(target_logits.float(), dim=-1)
         return probs
 
     def reset_counters(self):

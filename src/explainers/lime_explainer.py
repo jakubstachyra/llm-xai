@@ -34,55 +34,14 @@ class LIMEExplainer(BaseExplainer):
         self, 
         text: str, 
         target_class: Optional[int] = None, 
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        baseline_prob: Optional[float] = None,
     ) -> AttributionResult:
         start_time = time.time()
         
-        prompt = self.model_wrapper.format_prompt(text)
-        input_ids = self.model_wrapper.tokenizer.encode(
-            prompt, 
-            add_special_tokens=False
-        )
+        target_class, baseline_prob = self._resolve_target(text, target_class, baseline_prob)
+        review_start, review_end, input_ids = self.model_wrapper.find_review_span(text)
         num_tokens = len(input_ids)
-        
-        # Determine target class and baseline probability
-        _, probs_orig = self.model_wrapper.predict_single(text)
-        if target_class is None:
-            target_class = int(np.argmax(probs_orig))
-            
-        baseline_prob = float(probs_orig[target_class])
-        
-        prefix = "Review: "
-        text_start = len(prefix)
-        text_end = len(prefix) + len(text)
-
-        review_start = None
-        review_end = None
-        if getattr(self.model_wrapper.tokenizer, "is_fast", False):
-            try:
-                encoded = self.model_wrapper.tokenizer(prompt, return_offsets_mapping=True, add_special_tokens=False)
-                input_ids = encoded.input_ids
-                num_tokens = len(input_ids)
-                matching = [i for i, (s, e) in enumerate(encoded.offset_mapping) if max(s, text_start) < min(e, text_end)]
-                if matching:
-                    review_start = matching[0]
-                    review_end = matching[-1] + 1
-            except Exception:
-                pass
-
-        if review_start is None or review_end is None:
-            # Fallback for tokenizers without offset_mapping
-            prefix_ids = self.model_wrapper.tokenizer.encode(prefix, add_special_tokens=False)
-            suffix_ids = self.model_wrapper.tokenizer.encode("\nSentiment:", add_special_tokens=False)
-            prefix_len = len(prefix_ids)
-            suffix_len = len(suffix_ids)
-            if num_tokens > prefix_len + suffix_len:
-                review_start = prefix_len
-                review_end = num_tokens - suffix_len
-            else:
-                review_start = 0
-                review_end = num_tokens
-            
         num_review_tokens = review_end - review_start
         
         if num_review_tokens <= 1:
@@ -107,31 +66,47 @@ class LIMEExplainer(BaseExplainer):
         # Mask 0 is all ones (original unperturbed instance)
         masks = rng.choice([0, 1], size=(self.num_samples, num_review_tokens), p=[0.3, 0.7])
         masks[0] = 1 # ensure original instance is included
-        
-        # Build batched token sequences corresponding to the masks
+
+        # Fix all-zero masks BEFORE deduplication so masks matrix stays 1:1 with Ridge targets
+        empty_rows = masks.sum(axis=1) == 0
+        if np.any(empty_rows):
+            masks[empty_rows, 0] = 1
+
+        # Deduplicate identical binary masks prior to GPU inference
+        unique_masks, inv_idx = np.unique(masks, axis=0, return_inverse=True)
+
+        # Build batched token sequences corresponding to unique masks only
         prefix_part = input_ids[:review_start]
         suffix_part = input_ids[review_end:]
         review_token_ids = input_ids[review_start:review_end]
-        
-        perturbed_seqs = []
-        for mask in masks:
+
+        unique_seqs = []
+        for mask in unique_masks:
             active_review = [review_token_ids[j] for j in range(num_review_tokens) if mask[j] == 1]
-            if not active_review:
-                # If all masked out, retain at least one token to avoid empty sequence
-                active_review = [review_token_ids[0]]
-                mask[0] = 1
-            seq = prefix_part + active_review + suffix_part
-            perturbed_seqs.append(seq)
-            
-        # Left-pad sequences to uniform length for batched GPU forward pass
-        max_len = max(len(s) for s in perturbed_seqs)
+            unique_seqs.append(prefix_part + active_review + suffix_part)
+
+        # Sort by sequence length for dynamic per-batch left-padding
+        seq_lengths = np.array([len(s) for s in unique_seqs], dtype=np.int64)
+        order = np.argsort(seq_lengths, kind="stable")
+        sub_bs = max(1, int(getattr(self.model_wrapper, "default_sub_batch_size", 64)))
         pad_id = self.model_wrapper.pad_token_id
-        padded_batch = []
-        for s in perturbed_seqs:
-            padded_batch.append([pad_id] * (max_len - len(s)) + s)
-            
-        batch_arr = np.array(padded_batch, dtype=np.int64)
-        probs_perturbed = self.model_wrapper.predict_tokens_batch(batch_arr)
+
+        unique_probs_sorted = []
+        for start in range(0, len(order), sub_bs):
+            chunk_indices = order[start:start + sub_bs]
+            chunk_max_len = int(seq_lengths[chunk_indices[-1]])
+            padded_chunk = [
+                [pad_id] * (chunk_max_len - len(unique_seqs[idx])) + unique_seqs[idx]
+                for idx in chunk_indices
+            ]
+            batch_arr = np.array(padded_chunk, dtype=np.int64)
+            probs_chunk = self.model_wrapper.predict_tokens_batch(batch_arr, sub_batch_size=sub_bs)
+            unique_probs_sorted.append(probs_chunk)
+
+        unique_probs_ordered = np.vstack(unique_probs_sorted)
+        unique_probs = np.empty_like(unique_probs_ordered)
+        unique_probs[order] = unique_probs_ordered
+        probs_perturbed = unique_probs[inv_idx]
         y = probs_perturbed[:, target_class]
         
         # Calculate sample weights using exponential kernel on Hamming distance
@@ -164,5 +139,10 @@ class LIMEExplainer(BaseExplainer):
             execution_time=execution_time,
             explainer_name="LIME",
             baseline_prob=baseline_prob,
-            metadata={"r2_score": r2_score, "seed": effective_seed}
+            metadata={
+                "r2_score": r2_score,
+                "seed": effective_seed,
+                "num_samples": self.num_samples,
+                "unique_evals": int(len(unique_masks)),
+            }
         )

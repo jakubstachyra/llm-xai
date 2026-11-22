@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 from models import SentimentCausalLM
 from perturbations import TextPerturber
+from hardware_tracker import HardwareSessionTracker
 
 class PerturbationValidator:
     """
@@ -59,58 +60,70 @@ class PerturbationValidator:
         
         strict_preserved_count = 0
         total_samples = len(dataset)
+        device_name = getattr(self.model, "device_name", "Unknown")
+
+        tracker = HardwareSessionTracker(self.model, experiment_name="Perturbation-Validation", num_samples=total_samples)
+        tracker.start()
         
         iterator = tqdm(enumerate(dataset), total=total_samples, desc="Walidacja behawioralna") if progress_bar else enumerate(dataset)
 
         for idx, item in iterator:
-            orig_text = item["sentence"]
+            orig_text = str(item["sentence"]).strip()
             true_label = int(item["label"])
 
-            # Predict original sentence
-            orig_pred, orig_probs = self.model.predict_single(orig_text)
+            # Get categorized perturbations and batch-predict original + all perturbations together
+            cat_perts = TextPerturber.get_categorized_perturbations(orig_text)
+            flat_perts = [
+                (category, pert_name, str(pert_text).strip())
+                for category, perts in cat_perts.items()
+                for pert_name, pert_text in perts.items()
+            ]
+            batch_texts = [orig_text] + [pt for _, _, pt in flat_perts]
+            t_b0 = time.perf_counter()
+            all_probs = self.model.predict_texts_batch(batch_texts)
+            per_item_latency_ms = ((time.perf_counter() - t_b0) * 1000.0) / max(1, len(batch_texts))
+
+            orig_probs = all_probs[0]
+            orig_pred = int(np.argmax(orig_probs))
             orig_p_target = float(orig_probs[orig_pred])
             orig_is_correct = (orig_pred == true_label)
-
-            # Get categorized perturbations
-            cat_perts = TextPerturber.get_categorized_perturbations(orig_text)
             all_pert_preserved = True
 
-            for category, perts in cat_perts.items():
-                for pert_name, pert_text in perts.items():
-                    pert_pred, pert_probs = self.model.predict_single(pert_text)
-                    
-                    # Probability of original predicted class after perturbation
-                    pert_p_orig_target = float(pert_probs[orig_pred])
-                    prob_diff = orig_p_target - pert_p_orig_target
-                    abs_prob_diff = abs(prob_diff)
-                    
-                    # Did decision flip?
-                    decision_flip = (orig_pred != pert_pred)
-                    is_preserved = not decision_flip
-                    
-                    if decision_flip:
-                        all_pert_preserved = False
+            for p_idx, (category, pert_name, pert_text) in enumerate(flat_perts):
+                pert_probs = all_probs[p_idx + 1]
+                pert_pred = int(np.argmax(pert_probs))
+                pert_p_orig_target = float(pert_probs[orig_pred])
+                prob_diff = orig_p_target - pert_p_orig_target
+                abs_prob_diff = abs(prob_diff)
 
-                    pert_is_correct = (pert_pred == true_label)
+                decision_flip = (orig_pred != pert_pred)
+                is_preserved = not decision_flip
+                if decision_flip:
+                    all_pert_preserved = False
 
-                    records.append({
-                        "sample_id": idx,
-                        "perturbation_category": category,
-                        "perturbation_name": pert_name,
-                        "original_text": orig_text,
-                        "perturbed_text": pert_text,
-                        "true_label": true_label,
-                        "orig_pred": orig_pred,
-                        "pert_pred": pert_pred,
-                        "orig_prob": orig_p_target,
-                        "pert_prob": pert_p_orig_target,
-                        "prob_diff": prob_diff,
-                        "abs_prob_diff": abs_prob_diff,
-                        "decision_flip": decision_flip,
-                        "is_preserved": is_preserved,
-                        "orig_correct": orig_is_correct,
-                        "pert_correct": pert_is_correct
-                    })
+                pert_is_correct = (pert_pred == true_label)
+
+                records.append({
+                    "sample_id": idx,
+                    "device_name": device_name,
+                    "perturbation_category": category,
+                    "perturbation_name": pert_name,
+                    "original_text": orig_text,
+                    "perturbed_text": pert_text,
+                    "true_label": true_label,
+                    "orig_pred": orig_pred,
+                    "pert_pred": pert_pred,
+                    "orig_prob": orig_p_target,
+                    "pert_prob": pert_p_orig_target,
+                    "prob_diff": prob_diff,
+                    "abs_prob_diff": abs_prob_diff,
+                    "decision_flip": decision_flip,
+                    "is_preserved": is_preserved,
+                    "orig_correct": orig_is_correct,
+                    "pert_correct": pert_is_correct,
+                    "orig_latency_ms": round(per_item_latency_ms, 2),
+                    "pert_latency_ms": round(per_item_latency_ms, 2)
+                })
 
             if all_pert_preserved:
                 strict_preserved_count += 1
@@ -123,6 +136,10 @@ class PerturbationValidator:
         }
 
         self._compute_summary()
+        stats = tracker.stop(num_samples=total_samples)
+        tracker.log_session(stats=stats)
+        tracker.print_summary(stats=stats)
+
         return self.df_raw
 
     def _compute_summary(self):
@@ -155,7 +172,8 @@ class PerturbationValidator:
                 "std_abs_delta_p": std_abs_delta_p,
                 "orig_acc_pct": orig_acc,
                 "pert_acc_pct": pert_acc,
-                "acc_change_pct": pert_acc - orig_acc
+                "acc_change_pct": pert_acc - orig_acc,
+                "mean_pert_latency_ms": round(group["pert_latency_ms"].mean(), 2) if "pert_latency_ms" in group.columns else 0.0
             })
 
         self.df_summary = pd.DataFrame(summary_rows)

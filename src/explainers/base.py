@@ -42,16 +42,36 @@ class BaseExplainer(ABC):
         return name
 
     @abstractmethod
-    def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
+    def explain(
+        self,
+        text: str,
+        target_class: Optional[int] = None,
+        baseline_prob: Optional[float] = None,
+    ) -> AttributionResult:
         """
         Generates token attribution explanation for the input text.
         
         Args:
             text: Input sentence/review text.
             target_class: 0 for negative, 1 for positive. If None, predicted class is used.
+            baseline_prob: Optional precomputed P(target_class | text) to avoid redundant forward pass.
             
         Returns:
             AttributionResult object containing tokens, attributions, and metadata.
         """
         pass
+
+    def _resolve_target(
+        self,
+        text: str,
+        target_class: Optional[int] = None,
+        baseline_prob: Optional[float] = None,
+    ) -> tuple:
+        """Resolves (target_class, baseline_prob), skipping forward pass when both are provided."""
+        if target_class is not None and baseline_prob is not None:
+            return int(target_class), float(baseline_prob)
+        _, probs = self.model_wrapper.predict_single(text)
+        if target_class is None:
+            target_class = int(np.argmax(probs))
+        return int(target_class), float(probs[target_class])
 

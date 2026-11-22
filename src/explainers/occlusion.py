@@ -12,19 +12,19 @@ class OcclusionExplainer(BaseExplainer):
     def __init__(self, model_wrapper):
         super().__init__(model_wrapper)
 
-    def explain(self, text: str, target_class: Optional[int] = None) -> AttributionResult:
+    def explain(
+        self,
+        text: str,
+        target_class: Optional[int] = None,
+        baseline_prob: Optional[float] = None,
+    ) -> AttributionResult:
         start_time = time.time()
         
-        prompt = self.model_wrapper.format_prompt(text)
-        input_ids_tensor = self.model_wrapper.tokenizer.encode(prompt, return_tensors="pt")
+        input_ids_tensor = self.model_wrapper.encode_prompt(text, return_tensors="pt")
         input_ids = input_ids_tensor[0].tolist()
         num_tokens = len(input_ids)
         
-        _, probs_orig = self.model_wrapper.predict_single(text)
-        if target_class is None:
-            target_class = int(np.argmax(probs_orig))
-            
-        baseline_prob = float(probs_orig[target_class])
+        target_class, baseline_prob = self._resolve_target(text, target_class, baseline_prob)
         
         # Build batch of occluded token sequences (removing token i)
         # Sequence batch size: num_tokens
@@ -32,7 +32,6 @@ class OcclusionExplainer(BaseExplainer):
         
         # We can run occlusion in a single batch
         batch_seqs = []
-        max_len = num_tokens - 1
         
         for i in range(num_tokens):
             seq_without_i = input_ids[:i] + input_ids[i+1:]

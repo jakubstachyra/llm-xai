@@ -80,9 +80,9 @@ def main():
     parser.add_argument(
         "--ig-baseline",
         type=str,
-        default="zero",
+        default="mean",
         choices=["zero", "mean", "pad"],
-        help="Wektor bazowy dla Integrated Gradients: 'zero' (domyślny, spójny z RQ1), 'mean' lub 'pad'"
+        help="Wektor bazowy dla Integrated Gradients: 'mean' (domyślny, spójny z RQ1 i stabilny dla RMSNorm), 'zero' lub 'pad'"
     )
     parser.add_argument(
         "--lime-samples",
@@ -130,12 +130,24 @@ def main():
         default=42,
         help="Ziarno losowości dla powtarzalności (domyślnie: 42)"
     )
+    parser.add_argument(
+        "--rq1-attributions",
+        type=str,
+        default=None,
+        help="Opcjonalna ścieżka do pliku rq1_attributions.jsonl w celu ponownego użycia bazowych atrybucji z RQ1"
+    )
+    parser.add_argument(
+        "--sub-batch-size",
+        type=int,
+        default=None,
+        help="Opcjonalne ręczne nadpisanie rozmiaru mikro-paczki GPU (domyślnie automatyczne na podstawie VRAM)"
+    )
 
     args = parser.parse_args()
 
     # Load model
     print(f"\n[CLI] Inicjalizacja modelu '{args.model}'...")
-    model_wrapper = SentimentCausalLM(model_name=args.model)
+    model_wrapper = SentimentCausalLM(model_name=args.model, sub_batch_size=args.sub_batch_size)
 
     # Instantiate requested explainers
     selected_methods = [m.strip().lower() for m in args.methods.split(",") if m.strip()]
@@ -176,6 +188,7 @@ def main():
         resume=not args.no_resume,
         max_run_samples=args.max_run_samples,
         overwrite_methods=overwrite_list,
+        rq1_attributions_path=args.rq1_attributions,
     )
 
     print("\n" + "=" * 60)
@@ -184,8 +197,11 @@ def main():
         print(f"  [{op}] Wyniki zapisano w: {d}")
         print(f"    - Plik surowy: {os.path.join(d, 'rq2_faithfulness_raw.csv')}")
         print(f"    - Podsumowanie: {os.path.join(d, 'rq2_faithfulness_summary.csv')}")
+        print(f"    - Testy statystyczne: {os.path.join(d, 'rq2_statistical_tests.csv')}")
         print(f"    - Tabela LaTeX: {os.path.join(d, 'rq2_table.tex')}")
         print(f"    - Wykresy (PNG/PDF): {os.path.join(d, 'plots')}")
+    if args.operator == "both":
+        print(f"  [operator_comparison] Raport odporności operatorów: {experiment.base_output_dir}_operator_comparison")
     print("=" * 60 + "\n")
 
 

@@ -82,6 +82,13 @@ def main():
         help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 50)"
     )
     parser.add_argument(
+        "--ig-baseline",
+        type=str,
+        default="mean",
+        choices=["zero", "mean", "pad"],
+        help="Typ wektora bazowego dla Integrated Gradients: 'mean' (domyślny, stabilny dla LayerNorm/RMSNorm), 'zero' lub 'pad'"
+    )
+    parser.add_argument(
         "--lime-samples",
         type=int,
         default=500,
@@ -121,6 +128,17 @@ def main():
         action="store_true",
         help="Wyłącza kontrolę szumu własnego (reseed control) dla LIME/SHAP (domyślnie: WŁĄCZONA)"
     )
+    parser.add_argument(
+        "--overwrite-methods",
+        action="store_true",
+        help="Nadpisuje w istniejącym pliku checkpointa wyłącznie wybrane metody (--methods), pozostawiając pozostałe metody bez zmian."
+    )
+    parser.add_argument(
+        "--sub-batch-size",
+        type=int,
+        default=None,
+        help="Opcjonalne ręczne nadpisanie rozmiaru mikro-paczki GPU (domyślnie automatyczne na podstawie VRAM)."
+    )
 
     args = parser.parse_args()
 
@@ -139,7 +157,7 @@ def main():
     print(f"Próbki SST-2: {args.samples} (seed={args.seed})")
     print(f"Filtr par ze spójną predykcją (Decision-Preserved): {'TAK' if filter_preserved else 'NIE'}")
     print(f"Wybrane metody: {', '.join(selected_methods)}")
-    print(f"SHAP max_evals: {args.max_evals} | LIME samples: {args.lime_samples} | IG steps: {args.ig_steps}")
+    print(f"SHAP max_evals: {args.max_evals} | LIME samples: {args.lime_samples} | IG steps: {args.ig_steps} | IG baseline: {args.ig_baseline}")
     print(f"Katalog wyników: {output_dir}")
     print(f"Auto-wznawianie (Checkpoint): {'WYŁĄCZONE' if args.no_resume else 'WŁĄCZONE'}")
     if args.max_run_samples:
@@ -151,7 +169,7 @@ def main():
         model_name = "microsoft/phi-2"
 
     # 1. Initialize model
-    model = SentimentCausalLM(model_name=model_name)
+    model = SentimentCausalLM(model_name=model_name, sub_batch_size=args.sub_batch_size)
 
     # 2. Initialize explainers
     explainers = []
@@ -162,7 +180,7 @@ def main():
     if any(m in selected_methods for m in ["ig", "integrated_gradients", "integratedgradients"]):
         if IntegratedGradientsExplainer is None:
             raise ImportError("Brak modułu IntegratedGradientsExplainer lub jego zależności!")
-        explainers.append(IntegratedGradientsExplainer(model, steps=args.ig_steps))
+        explainers.append(IntegratedGradientsExplainer(model, steps=args.ig_steps, baseline_type=args.ig_baseline))
     if "lime" in selected_methods:
         explainers.append(LIMEExplainer(model, num_samples=args.lime_samples, seed=args.seed))
     if "shap" in selected_methods:
@@ -185,6 +203,9 @@ def main():
 
     checkpoint_file = None if args.no_resume else os.path.join(output_dir, "rq1_stability_raw.csv")
 
+    from experiments.rq1_stability import explainer_label
+    overwrite_list = [explainer_label(e) for e in explainers] if args.overwrite_methods else None
+
     print("\n[Start] Rozpoczęcie procedury eksperymentalnej...")
     experiment.run(
         num_samples=args.samples, 
@@ -193,7 +214,8 @@ def main():
         progress_bar=True,
         checkpoint_path=checkpoint_file,
         max_samples_this_run=args.max_run_samples,
-        include_noise_floor=not args.no_noise_floor
+        include_noise_floor=not args.no_noise_floor,
+        overwrite_methods=overwrite_list
     )
 
     # 4. Save artifacts, summary, LaTeX and plots
@@ -203,6 +225,10 @@ def main():
     print("\n" + "=" * 70)
     print("ZAKOŃCZONO POMYŚLNIE EKSPERYMENT DLA PYTANIA BADAWCZEGO 1!")
     print(f"Tabela LaTeX gotowa w: {paths['latex_table']}")
+    if paths.get("preservation_summary_csv"):
+        print(f"Zachowanie decyzji (Preservation Rate): {paths['preservation_summary_csv']}")
+    if paths.get("strength_analysis_csv"):
+        print(f"Analiza siły perturbacji: {paths['strength_analysis_csv']}")
     print(f"Wykresy do pracy magisterskiej: {paths['plots_dir']}")
     print("=" * 70)
 

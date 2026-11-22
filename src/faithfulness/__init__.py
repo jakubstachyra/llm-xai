@@ -17,6 +17,7 @@ from src.faithfulness.perturbations import (
 from src.faithfulness.metrics import (
     FaithfulnessCurveResult,
     calculate_aopc,
+    compute_additive_gap,
     compute_normalized_gap,
     evaluate_faithfulness_curves,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "apply_embedding_mask",
     "FaithfulnessCurveResult",
     "calculate_aopc",
+    "compute_additive_gap",
     "compute_normalized_gap",
     "evaluate_faithfulness_curves",
 ]
