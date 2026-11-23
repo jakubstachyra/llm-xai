@@ -586,6 +586,9 @@ class RQ1StabilityExperiment:
                         sample_new_records.append(row)
                         completed_units.add((sample_idx, explainer_name, NOISE_FLOOR_NAME))
 
+                    if torch.cuda.is_available() and getattr(explainer, "ig_batch_size", None) is not None:
+                        torch.cuda.empty_cache()
+
                 if sample_new_records:
                     unflushed_records.extend(sample_new_records)
                     samples_processed_this_run += 1

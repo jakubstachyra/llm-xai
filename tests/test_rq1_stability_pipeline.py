@@ -14,6 +14,7 @@ from src.explainers.base import BaseExplainer, AttributionResult
 from src.explainers.integrated_gradients import IntegratedGradientsExplainer
 from src.experiments.rq1_stability import RQ1StabilityExperiment
 from src.experiments.rq2_faithfulness import RQ2FaithfulnessExperiment
+from src.models import SentimentCausalLM
 from src.metrics import (
     compute_all_stability_metrics,
     stability_spearman,
@@ -327,6 +328,18 @@ class TestRQ1StabilityPipeline(unittest.TestCase):
             df_dec = pd.read_csv(dec_csv)
             assert len(df_dec) > 0
             assert (df_dec["is_preserved"] == False).all()
+
+    def test_effective_sub_batch_size_scales_down_on_long_sequences(self):
+        dummy = SentimentCausalLM.__new__(SentimentCausalLM)
+        dummy.default_sub_batch_size = 24
+        dummy.max_tokens_per_batch = 768
+
+        assert dummy._effective_sub_batch_size(None, seq_len=20) == 24
+        assert dummy._effective_sub_batch_size(None, seq_len=40) == 19
+        assert dummy._effective_sub_batch_size(None, seq_len=95) == 8
+        assert dummy._effective_sub_batch_size(None, seq_len=300) == 4
+        assert dummy._effective_sub_batch_size(16, seq_len=95) == 8
+        assert dummy._effective_sub_batch_size(6, seq_len=95) == 6
 
 
 if __name__ == "__main__":

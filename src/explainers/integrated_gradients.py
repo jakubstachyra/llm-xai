@@ -48,10 +48,19 @@ class IntegratedGradientsExplainer(BaseExplainer):
         if param_count is None:
             param_count = sum(p.numel() for p in self.model_wrapper.model.parameters()) if hasattr(self.model_wrapper, "model") else 7e9
         is_large_model = param_count > 4e9
+        is_heavy_model = param_count > 6e9
+        self._ig_max_tokens_per_batch: Optional[int] = None
         if self.model_wrapper.device == "cuda" and torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
             if is_large_model:
-                self.ig_batch_size = 32 if total_mem >= 30 else (16 if total_mem >= 16 else 8)
+                if total_mem >= 30:
+                    self.ig_batch_size = 32
+                elif total_mem >= 16:
+                    self.ig_batch_size = 8 if is_heavy_model else 16
+                    self._ig_max_tokens_per_batch = 320 if is_heavy_model else 1024
+                else:
+                    self.ig_batch_size = 4 if is_heavy_model else 8
+                    self._ig_max_tokens_per_batch = 192 if is_heavy_model else 512
             else:
                 self.ig_batch_size = 64 if total_mem >= 30 else (32 if total_mem >= 16 else 16)
         else:
@@ -167,7 +176,11 @@ class IntegratedGradientsExplainer(BaseExplainer):
             del endpoints, endpoint_logits, endpoint_scores
         self.model_wrapper.forward_pass_count += 2
 
+        seq_len = int(input_ids.shape[1])
         ig_batch_size = self.ig_batch_size
+        ig_max_tokens = getattr(self, "_ig_max_tokens_per_batch", None)
+        if ig_max_tokens is not None and seq_len > 0:
+            ig_batch_size = max(1, min(ig_batch_size, ig_max_tokens // seq_len))
 
         # Quadrature nodes and weights on [0, 1]
         if self.quadrature == "midpoint":

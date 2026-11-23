@@ -71,13 +71,27 @@ class SentimentCausalLM:
 
         # Cache parameter count and default sub-batch size once
         self.param_count = sum(p.numel() for p in self.model.parameters())
-        if sub_batch_size is not None:
-            self.default_sub_batch_size = int(sub_batch_size)
-        elif self.device == "cuda" and torch.cuda.is_available():
+        self.max_tokens_per_batch: Optional[int] = None
+        if self.device == "cuda" and torch.cuda.is_available():
             total_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            self.default_sub_batch_size = 128 if total_mem >= 30 else (64 if total_mem >= 16 else 32)
+            is_heavy_model = self.param_count > 6e9
+            if total_mem >= 30:
+                self.max_tokens_per_batch = 8192
+            elif total_mem >= 16:
+                self.max_tokens_per_batch = 768 if is_heavy_model else 4096
+            else:
+                self.max_tokens_per_batch = 512 if is_heavy_model else 2048
+
+            if sub_batch_size is not None:
+                self.default_sub_batch_size = max(1, int(sub_batch_size))
+            elif total_mem >= 30:
+                self.default_sub_batch_size = 128
+            elif total_mem >= 16:
+                self.default_sub_batch_size = 24 if is_heavy_model else 64
+            else:
+                self.default_sub_batch_size = 16 if is_heavy_model else 32
         else:
-            self.default_sub_batch_size = 8
+            self.default_sub_batch_size = max(1, int(sub_batch_size)) if sub_batch_size is not None else 8
 
         # Precompute prefix/suffix token IDs for template span finding
         self._prefix_str = "Review: "
@@ -209,16 +223,29 @@ class SentimentCausalLM:
         pred_class = int(np.argmax(probs))
         return pred_class, probs
 
+    def _effective_sub_batch_size(self, requested_bs: Optional[int], seq_len: int) -> int:
+        """
+        Caps sub-batch size by a dynamic token-per-batch budget so long sequences
+        do not spill VRAM into Windows Shared GPU Memory on 24 GB cards.
+        """
+        bs = self.default_sub_batch_size if requested_bs is None else max(1, int(requested_bs))
+        max_tokens = getattr(self, "max_tokens_per_batch", None)
+        if max_tokens is not None and seq_len > 0:
+            cap = max(4, max_tokens // int(seq_len))
+            bs = min(bs, cap)
+        return max(1, bs)
+
     def predict_tokens_batch(self, token_ids_batch: np.ndarray, sub_batch_size: int = None) -> np.ndarray:
         """
         Memory-safe batch prediction function compatible with SHAP and Occlusion.
         Takes 1D or 2D array of token IDs, returns probabilities [p_neg, p_pos].
         """
-        if sub_batch_size is None:
-            sub_batch_size = self.default_sub_batch_size
         if len(token_ids_batch.shape) == 1:
             token_ids_batch = np.expand_dims(token_ids_batch, axis=0)
-            
+
+        seq_len = int(token_ids_batch.shape[1])
+        sub_batch_size = self._effective_sub_batch_size(sub_batch_size, seq_len)
+
         num_samples = len(token_ids_batch)
         self.forward_pass_count += num_samples
         self.forward_token_count += int(token_ids_batch.size)
@@ -252,10 +279,10 @@ class SentimentCausalLM:
         """
         if not texts:
             return np.zeros((0, 2), dtype=np.float32)
-        if sub_batch_size is None:
-            sub_batch_size = self.default_sub_batch_size
 
         prompts = [self.format_prompt(t) for t in texts]
+        approx_seq_len = max(16, max(len(p) for p in prompts) // 3)
+        sub_batch_size = self._effective_sub_batch_size(sub_batch_size, approx_seq_len)
         num_samples = len(prompts)
         probs_list = []
 
