@@ -5,17 +5,27 @@ import transformers
 import numpy as np
 from typing import List, Tuple, Dict, Union, Optional
 
+DEFAULT_CALIBRATION_TEXTS: Tuple[str, ...] = ("N/A", "", "[MASK]")
+
+
 class SentimentCausalLM:
     """
     Wrapper for Causal LM sentiment classification on GPU/CPU.
-    Calculates probabilities for positive/negative sentiment labels.
+    Calculates probabilities for positive/negative sentiment labels with optional
+    Contextual Calibration (Zhao et al., ICML 2021) to remove zero-shot label prior bias.
     """
     def __init__(
         self, 
         model_name: str = "microsoft/phi-2", 
         torch_dtype: torch.dtype = torch.bfloat16,
         device: str = None,
-        sub_batch_size: Optional[int] = None
+        sub_batch_size: Optional[int] = None,
+        calibrate_logits: bool = True,
+        calibration_texts: Optional[List[str]] = None,
+        prompt_prefix: str = "Review: ",
+        prompt_suffix: str = "\nSentiment:",
+        neg_label: str = " negative",
+        pos_label: str = " positive",
     ):
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -93,17 +103,52 @@ class SentimentCausalLM:
         else:
             self.default_sub_batch_size = max(1, int(sub_batch_size)) if sub_batch_size is not None else 8
 
-        # Precompute prefix/suffix token IDs for template span finding
-        self._prefix_str = "Review: "
-        self._suffix_str = "\nSentiment:"
-        self._prefix_ids = self.tokenizer.encode(self._prefix_str, add_special_tokens=False)
-        self._suffix_ids = self.tokenizer.encode(self._suffix_str, add_special_tokens=False)
+        # Target token IDs and prompt template configuration
+        self.calibrate_logits: bool = bool(calibrate_logits)
+        self._calibration_texts: Optional[List[str]] = list(calibration_texts) if calibration_texts is not None else None
+        self._calibration_bias: Optional[torch.Tensor] = None
+        self.calibration_prior_probs: Optional[np.ndarray] = None
+        self.set_prompt_template(
+            prompt_prefix=prompt_prefix,
+            prompt_suffix=prompt_suffix,
+            neg_label=neg_label,
+            pos_label=pos_label,
+            calibrate_logits=self.calibrate_logits,
+            calibration_texts=self._calibration_texts,
+        )
 
         # Hardware-invariant complexity tracking
         self.forward_pass_count = 0
         self.backward_pass_count = 0
         self.forward_token_count = 0
         self._baseline_forward_latency_s = None
+
+    def _compute_calibration_bias(self, calibration_texts: Optional[List[str]] = None) -> None:
+        """
+        Estimates the model's content-free label prior over {'negative', 'positive'} using
+        neutral placeholders ('N/A', '', '[MASK]') per Zhao et al. (ICML 2021) and stores
+        the centered log-prior vector b_cal so calibrated logits equal z(x) - b_cal.
+        """
+        cf_inputs = list(calibration_texts) if calibration_texts is not None else list(DEFAULT_CALIBRATION_TEXTS)
+        self._calibration_bias = None
+        cf_probs = []
+        with torch.inference_mode():
+            for cf_text in cf_inputs:
+                ids = self.encode_prompt(cf_text, return_tensors="pt")
+                raw_logits = self.forward_target_logits(input_ids=ids)[0]
+                p = torch.softmax(raw_logits.float(), dim=-1).cpu().numpy()
+                cf_probs.append(p)
+        p_bar = np.clip(np.mean(cf_probs, axis=0), 1e-8, 1.0 - 1e-8)
+        p_bar = p_bar / np.sum(p_bar)
+        log_p = np.log(p_bar)
+        b_cal = log_p - float(np.mean(log_p))
+        self.calibration_prior_probs = p_bar.astype(np.float64)
+        self._calibration_bias = torch.tensor(b_cal, dtype=torch.float32, device=self.device).view(1, 2)
+        margin_shift = float(b_cal[0] - b_cal[1])
+        print(
+            f"Contextual calibration (Zhao et al., 2021) -> content-free prior "
+            f"P(neg)={p_bar[0]:.4f}, P(pos)={p_bar[1]:.4f} | pos-neg logit correction: {margin_shift:+.4f}"
+        )
 
     @property
     def device_name(self) -> str:
@@ -124,9 +169,42 @@ class SentimentCausalLM:
         ids = self.tokenizer.encode(default, add_special_tokens=False)
         return ids[0]
 
+    def set_prompt_template(
+        self,
+        prompt_prefix: str = "Review: ",
+        prompt_suffix: str = "\nSentiment:",
+        neg_label: str = " negative",
+        pos_label: str = " positive",
+        calibrate_logits: Optional[bool] = None,
+        calibration_texts: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Updates the prompt template and verbalizers in-place and recomputes
+        Contextual Calibration bias without reloading model weights.
+        """
+        self._prefix_str = str(prompt_prefix)
+        self._suffix_str = str(prompt_suffix)
+        self._prefix_ids = self.tokenizer.encode(self._prefix_str, add_special_tokens=False)
+        self._suffix_ids = self.tokenizer.encode(self._suffix_str, add_special_tokens=False)
+
+        neg_id = self._get_token_id(neg_label, default=neg_label.strip())
+        pos_id = self._get_token_id(pos_label, default=pos_label.strip())
+        self.target_token_ids = [neg_id, pos_id]
+
+        if calibrate_logits is not None:
+            self.calibrate_logits = bool(calibrate_logits)
+        if calibration_texts is not None:
+            self._calibration_texts = list(calibration_texts)
+
+        if self.calibrate_logits:
+            self._compute_calibration_bias(self._calibration_texts)
+        else:
+            self._calibration_bias = None
+            self.calibration_prior_probs = None
+
     def format_prompt(self, text: str) -> str:
         """Formats review text into a sentiment classification prompt."""
-        return f"Review: {text}\nSentiment:"
+        return f"{self._prefix_str}{text}{self._suffix_str}"
 
     def encode_prompt(self, text: str, return_tensors: Optional[str] = "pt") -> Union[torch.Tensor, np.ndarray, List[int]]:
         """
@@ -178,9 +256,10 @@ class SentimentCausalLM:
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Computes logits of shape (batch_size, 2) for [negative, positive] at the final token position
+        Computes float32 logits of shape (batch_size, 2) for [negative, positive] at the final token position
         WITHOUT materializing full-vocabulary logits across all sequence positions (B, L, V).
-        Saves ~2-3 GB of VRAM per batch on 152k-vocab models (Qwen2.5) and speeds up autograd.
+        Projects the 2-class head in float32 to eliminate bfloat16 logit quantization (0.0625-0.125 ULP steps)
+        and applies Contextual Calibration bias removal when enabled.
         """
         base = getattr(self.model, "model", None) or getattr(self.model, "transformer", None)
         out_emb = self.model.get_output_embeddings()
@@ -192,18 +271,24 @@ class SentimentCausalLM:
                 use_cache=False,
                 return_dict=True,
             )
-            last_hidden = base_out.last_hidden_state[:, -1, :]  # (B, H)
-            target_w = out_emb.weight[self.target_token_ids]     # (2, H)
-            target_b = out_emb.bias[self.target_token_ids] if getattr(out_emb, "bias", None) is not None else None
-            return torch.nn.functional.linear(last_hidden, target_w, target_b)
+            last_hidden = base_out.last_hidden_state[:, -1, :].to(torch.float32)  # (B, H)
+            target_w = out_emb.weight[self.target_token_ids].to(torch.float32)    # (2, H)
+            raw_b = getattr(out_emb, "bias", None)
+            target_b = raw_b[self.target_token_ids].to(torch.float32) if raw_b is not None else None
+            logits = torch.nn.functional.linear(last_hidden, target_w, target_b)
+        else:
+            outputs = self.model(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+            logits = outputs.logits[:, -1, self.target_token_ids].to(torch.float32)
 
-        outputs = self.model(
-            input_ids=input_ids,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            use_cache=False,
-        )
-        return outputs.logits[:, -1, self.target_token_ids]
+        cal_bias = getattr(self, "_calibration_bias", None)
+        if cal_bias is not None:
+            logits = logits - cal_bias.to(device=logits.device, dtype=logits.dtype)
+        return logits
 
     def predict_single(self, text: str) -> Tuple[int, np.ndarray]:
         """

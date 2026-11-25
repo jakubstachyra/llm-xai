@@ -29,6 +29,13 @@ def _slice_review_tokens(
     if not filter_prompt_template or len(tokens) == 0:
         return tokens, attrs
 
+    if isinstance(res.metadata, dict) and "review_span" in res.metadata:
+        span = res.metadata["review_span"]
+        if isinstance(span, (tuple, list)) and len(span) == 2:
+            s_idx, e_idx = int(span[0]), int(span[1])
+            if 0 <= s_idx < e_idx <= len(tokens):
+                return tokens[s_idx:e_idx], attrs[s_idx:e_idx]
+
     # Positional detection of 'Review:' prefix at the start of the prompt
     start_idx = 0
     joined_prefix = ""

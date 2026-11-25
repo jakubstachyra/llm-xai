@@ -71,7 +71,8 @@ class IntegratedGradientsExplainer(BaseExplainer):
         if hasattr(self.model_wrapper, "find_review_span"):
             s, e, _ = self.model_wrapper.find_review_span(text, num_tokens=num_tokens)
             return s, e
-        prefix = "Review: "
+        prefix = getattr(self.model_wrapper, "_prefix_str", "Review: ")
+        suffix = getattr(self.model_wrapper, "_suffix_str", "\nSentiment:")
         text_start = len(prefix)
         text_end = len(prefix) + len(text)
 
@@ -90,7 +91,7 @@ class IntegratedGradientsExplainer(BaseExplainer):
                 pass
 
         prefix_ids = self.model_wrapper.tokenizer.encode(prefix, add_special_tokens=False)
-        suffix_ids = self.model_wrapper.tokenizer.encode("\nSentiment:", add_special_tokens=False)
+        suffix_ids = self.model_wrapper.tokenizer.encode(suffix, add_special_tokens=False)
         if num_tokens > len(prefix_ids) + len(suffix_ids):
             return len(prefix_ids), num_tokens - len(suffix_ids)
         return 0, num_tokens
