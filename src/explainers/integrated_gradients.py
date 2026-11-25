@@ -62,7 +62,9 @@ class IntegratedGradientsExplainer(BaseExplainer):
                     self.ig_batch_size = 4 if is_heavy_model else 8
                     self._ig_max_tokens_per_batch = 192 if is_heavy_model else 512
             else:
-                self.ig_batch_size = 64 if total_mem >= 30 else (32 if total_mem >= 16 else 16)
+                self.ig_batch_size = 64 if total_mem >= 30 else (32 if total_mem >= 16 else 4)
+                if total_mem < 16:
+                    self._ig_max_tokens_per_batch = 192
         else:
             self.ig_batch_size = 4
 

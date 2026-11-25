@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import torch
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from tqdm import tqdm
@@ -292,6 +293,8 @@ class PromptSensitivityExperiment:
                         res.metadata = {}
                     res.metadata["review_span"] = (span_start, span_end)
                     attr_cache[spec.name][exp_name][sid] = res
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
         raw_rows: List[Dict[str, Any]] = []
         for spec in self.templates:
