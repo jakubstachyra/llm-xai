@@ -50,26 +50,46 @@ class PromptTemplateSpec:
 DEFAULT_PROMPT_TEMPLATES: List[PromptTemplateSpec] = [
     PromptTemplateSpec(
         name="zhao2021_base",
-        description="Base template (Zhao et al., ICML 2021): Review: {text}\\nSentiment:",
+        description=(
+            "Baseline template adapted from the SST-2 format of Zhao et al. "
+            "(ICML 2021, 'Calibrate Before Use'): 'Review: {text}\\nSentiment:'. "
+            "Used here in a zero-shot setting (no in-context examples)."
+        ),
         prefix="Review: ",
         suffix="\nSentiment:",
         is_baseline=True,
     ),
     PromptTemplateSpec(
         name="paraphrase_instruction",
-        description="Instruction paraphrase: Classify the sentiment...\\nReview: {text}\\nSentiment:",
+        description=(
+            "Own wording based on a common prompt pattern (task instruction "
+            "followed by the input): 'Classify the sentiment of the following "
+            "movie review.\\nReview: {text}\\nSentiment:'. Generic formulation, "
+            "widely used in prompting tutorials; not attributed to a single source."
+        ),
         prefix="Classify the sentiment of the following movie review.\nReview: ",
         suffix="\nSentiment:",
     ),
     PromptTemplateSpec(
         name="paraphrase_question",
-        description="Question paraphrase: Movie review: {text}\\nQuestion: ...\\nAnswer:",
+        description=(
+            "Own wording based on a common prompt pattern (task phrased as a "
+            "question with an 'Answer:' cue): 'Movie review: {text}\\nQuestion: "
+            "Is the sentiment positive or negative?\\nAnswer:'. Similar in style "
+            "to the Review/Answer format of Zhao et al. (2021); exact wording "
+            "is not taken from a specific source."
+        ),
         prefix="Movie review: ",
         suffix="\nQuestion: Is the sentiment positive or negative?\nAnswer:",
     ),
     PromptTemplateSpec(
         name="paraphrase_polarity",
-        description="Label paraphrase: Text: {text}\\nOverall sentiment:",
+        description=(
+            "Own wording based on the baseline: the input field name is changed "
+            "('Review' -> 'Text') and the label cue is changed ('Sentiment' -> "
+            "'Overall sentiment'): 'Text: {text}\\nOverall sentiment:'. "
+            "Generic formulation; no specific source identified."
+        ),
         prefix="Text: ",
         suffix="\nOverall sentiment:",
     ),
@@ -373,16 +393,32 @@ class PromptSensitivityExperiment:
         )
         df_attr_raw.to_csv(os.path.join(output_dir, "prompt_attribution_raw.csv"), index=False)
 
-        df_preserved = df_attr_raw[df_attr_raw["decision_preserved"]].copy()
+        df_summary = self.summarize_and_plot(
+            df_clf=df_clf,
+            df_attr_raw=df_attr_raw,
+            model_name=self.model.model_name,
+            output_dir=output_dir,
+        )
+        return df_clf, df_attr_raw, df_summary
+
+    @classmethod
+    def summarize_and_plot(
+        cls,
+        df_clf: pd.DataFrame,
+        df_attr_raw: pd.DataFrame,
+        model_name: str,
+        output_dir: str,
+    ) -> pd.DataFrame:
+        os.makedirs(output_dir, exist_ok=True)
         metric_cols = [
-            "spearman_rho", "kendall_tau", "pearson_r",
-            "top1_jaccard", "top3_jaccard", "top5_jaccard",
+            "spearman", "kendall", "pearson",
+            "jaccard_k1", "jaccard_k3", "jaccard_k5",
         ]
         summary_rows: List[Dict[str, Any]] = []
         for (exp_name, var_name), grp in df_attr_raw.groupby(["explainer", "variant_template"]):
             grp_pres = grp[grp["decision_preserved"]]
             row: Dict[str, Any] = {
-                "model": self.model.model_name,
+                "model": model_name,
                 "explainer": exp_name,
                 "variant_template": var_name,
                 "n_total": int(len(grp)),
@@ -398,13 +434,14 @@ class PromptSensitivityExperiment:
         df_summary = pd.DataFrame(summary_rows)
         df_summary.to_csv(os.path.join(output_dir, "prompt_attribution_summary.csv"), index=False)
 
-        self._plot_summary(df_clf, df_summary, output_dir)
-        return df_clf, df_attr_raw, df_summary
+        cls._plot_summary_static(df_clf, df_summary, model_name, output_dir)
+        return df_summary
 
-    def _plot_summary(
-        self,
+    @staticmethod
+    def _plot_summary_static(
         df_clf: pd.DataFrame,
         df_summary: pd.DataFrame,
+        model_name: str,
         output_dir: str,
     ) -> None:
         fig, axes = plt.subplots(1, 2, figsize=(13, 5))
@@ -418,14 +455,14 @@ class PromptSensitivityExperiment:
         axes[0].set_xticklabels(df_clf["template"], rotation=20, ha="right")
         axes[0].set_ylim(0.5, 1.02)
         axes[0].set_ylabel("Score")
-        axes[0].set_title(f"Zero-Shot Classification ({self.model.model_name})")
+        axes[0].set_title(f"Zero-Shot Classification ({model_name})")
         axes[0].legend()
         axes[0].grid(axis="y", alpha=0.3)
 
         # Right panel: Attribution Spearman rho vs base prompt
         if not df_summary.empty:
             piv = df_summary.pivot(
-                index="variant_template", columns="explainer", values="spearman_rho_mean"
+                index="variant_template", columns="explainer", values="spearman_mean"
             )
             piv.plot(kind="bar", ax=axes[1], rot=20)
             axes[1].set_ylim(-0.1, 1.05)
