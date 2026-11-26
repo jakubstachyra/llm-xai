@@ -385,18 +385,24 @@ class PromptSensitivityExperiment:
         )
         df_clf.to_csv(os.path.join(output_dir, "prompt_classification_metrics.csv"), index=False)
 
-        df_attr_raw = self.evaluate_attribution_stability(
-            samples=attr_set,
-            preds_by_template=preds_by_template,
-            methods=methods,
-            ig_steps=ig_steps,
-            ig_baseline=ig_baseline,
-            lime_samples=lime_samples,
-            max_evals_shap=max_evals_shap,
-            calibrate=calibrate,
-            progress_bar=progress_bar,
-        )
-        df_attr_raw.to_csv(os.path.join(output_dir, "prompt_attribution_raw.csv"), index=False)
+        if attr_samples > 0 and len(methods) > 0:
+            df_attr_raw = self.evaluate_attribution_stability(
+                samples=attr_set,
+                preds_by_template=preds_by_template,
+                methods=methods,
+                ig_steps=ig_steps,
+                ig_baseline=ig_baseline,
+                lime_samples=lime_samples,
+                max_evals_shap=max_evals_shap,
+                calibrate=calibrate,
+                progress_bar=progress_bar,
+            )
+            df_attr_raw.to_csv(os.path.join(output_dir, "prompt_attribution_raw.csv"), index=False)
+        else:
+            df_attr_raw = pd.DataFrame(columns=[
+                "model", "sample_id", "explainer", "base_template",
+                "variant_template", "base_pred", "variant_pred", "decision_preserved",
+            ])
 
         df_summary = self.summarize_and_plot(
             df_clf=df_clf,
@@ -437,7 +443,8 @@ class PromptSensitivityExperiment:
             summary_rows.append(row)
 
         df_summary = pd.DataFrame(summary_rows)
-        df_summary.to_csv(os.path.join(output_dir, "prompt_attribution_summary.csv"), index=False)
+        if not df_summary.empty:
+            df_summary.to_csv(os.path.join(output_dir, "prompt_attribution_summary.csv"), index=False)
 
         cls._plot_summary_static(df_clf, df_summary, model_name, output_dir)
         return df_summary
