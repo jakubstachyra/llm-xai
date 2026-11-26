@@ -68,14 +68,14 @@ def main():
     parser.add_argument(
         "--max-evals-shap",
         type=int,
-        default=1200,
-        help="Liczba ewaluacji Monte Carlo dla PermutationExplainer w SHAP (domyślnie: 1200)"
+        default=2500,
+        help="Liczba ewaluacji Monte Carlo dla PermutationExplainer w SHAP (domyślnie: 2500)"
     )
     parser.add_argument(
         "--ig-steps",
         type=int,
-        default=50,
-        help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 50)"
+        default=100,
+        help="Liczba kroków interpolacji dla Integrated Gradients (domyślnie: 100)"
     )
     parser.add_argument(
         "--ig-baseline",
@@ -87,8 +87,8 @@ def main():
     parser.add_argument(
         "--lime-samples",
         type=int,
-        default=500,
-        help="Liczba próbek zaburzających dla LIME (domyślnie: 500)"
+        default=1000,
+        help="Liczba próbek zaburzających dla LIME (domyślnie: 1000)"
     )
     parser.add_argument(
         "--random-trials",
@@ -131,6 +131,12 @@ def main():
         help="Ziarno losowości dla powtarzalności (domyślnie: 42)"
     )
     parser.add_argument(
+        "--num-seeds",
+        type=int,
+        default=3,
+        help="Liczba niezależnych seedów dla metod stochastycznych LIME i Permutation SHAP (domyślnie: 3; deterministyczne zawsze R=1)"
+    )
+    parser.add_argument(
         "--rq1-attributions",
         type=str,
         default=None,
@@ -142,12 +148,21 @@ def main():
         default=None,
         help="Opcjonalne ręczne nadpisanie rozmiaru mikro-paczki GPU (domyślnie automatyczne na podstawie VRAM)"
     )
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="Wyłącza kalibrację kontekstową logitów (Zhao et al., 2021); domyślnie kalibracja WŁĄCZONA."
+    )
 
     args = parser.parse_args()
 
     # Load model
-    print(f"\n[CLI] Inicjalizacja modelu '{args.model}'...")
-    model_wrapper = SentimentCausalLM(model_name=args.model, sub_batch_size=args.sub_batch_size)
+    print(f"\n[CLI] Inicjalizacja modelu '{args.model}' (calibrate_logits={not args.no_calibrate})...")
+    model_wrapper = SentimentCausalLM(
+        model_name=args.model,
+        sub_batch_size=args.sub_batch_size,
+        calibrate_logits=not args.no_calibrate,
+    )
 
     # Instantiate requested explainers
     selected_methods = [m.strip().lower() for m in args.methods.split(",") if m.strip()]
@@ -177,6 +192,7 @@ def main():
         operator=args.operator,
         max_k=args.max_k,
         random_trials=args.random_trials,
+        stochastic_num_seeds=args.num_seeds,
         output_dir=args.output_dir
     )
 

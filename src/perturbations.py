@@ -12,10 +12,11 @@ class TextPerturber:
     # 1. Surface / Orthographic Perturbations
     # =========================================================================
     @staticmethod
-    def lowercase(text: str) -> str:
+    def case_toggle(text: str) -> str:
         """
-        Converts text to lowercase; if already lowercase (as in SST-2), applies
-        Title-Case capitalization to initial words so the surface perturbation is never a no-op.
+        Toggles initial/sentence casing: converts mixed/uppercase text to lowercase,
+        and when input is already all-lowercase (as in SST-2), applies Title-Case
+        capitalization to initial words so the surface perturbation is never a no-op.
         """
         lowered = text.lower()
         if lowered.strip() != text.strip():
@@ -29,6 +30,11 @@ class TextPerturber:
                 words[i] = words[i].capitalize()
                 break
         return " ".join(words)
+
+    @classmethod
+    def lowercase(cls, text: str) -> str:
+        """Backward-compatible alias for case_toggle."""
+        return cls.case_toggle(text)
 
     @staticmethod
     def uppercase(text: str) -> str:
@@ -233,14 +239,14 @@ class TextPerturber:
         """
         Returns a complete dictionary of 16 meaning-preserving perturbations
         grouped into 4 scientific categories:
-        - surface: lowercase, uppercase, remove_punct, add_period, double_space, typo_swap
+        - surface: case_toggle, uppercase, remove_punct, add_period, double_space, typo_swap
         - prefix: overall, opinion, in_summary, instruction, frankly
         - suffix: indeed, movie, experience
         - lexical: domain_synonym, contractions
         """
         return {
             "surface": {
-                "lowercase": cls.lowercase(text),
+                "case_toggle": cls.case_toggle(text),
                 "uppercase": cls.uppercase(text),
                 "remove_punct": cls.remove_punctuation(text),
                 "add_period": cls.add_punctuation(text, "."),

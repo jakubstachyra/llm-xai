@@ -42,6 +42,11 @@ def main():
         default="results/perturbation_validation", 
         help="Katalog zapisu wyników i wykresów (domyślnie: 'results/perturbation_validation')"
     )
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="Wyłącza kalibrację kontekstową logitów (Zhao et al., 2021); domyślnie kalibracja WŁĄCZONA."
+    )
     
     args = parser.parse_args()
 
@@ -51,13 +56,13 @@ def main():
 
     print("=" * 70)
     print("FAZA 1: WALIDACJA BEHAWIORALNA PERTURBACJI NA MODELU CAUSAL LM")
-    print(f"Model: {args.model}")
+    print(f"Model: {args.model} | Kalibracja kontekstowa: {'TAK' if not args.no_calibrate else 'NIE'}")
     print(f"Próbki: {'Cały zbiór (872 zdania)' if args.limit is None else f'{args.limit} zdań'}")
     print(f"Katalog wyników: {output_dir}")
     print("=" * 70)
 
     # 1. Initialize model
-    model = SentimentCausalLM(model_name=args.model)
+    model = SentimentCausalLM(model_name=args.model, calibrate_logits=not args.no_calibrate)
 
     # 2. Run validator
     validator = PerturbationValidator(

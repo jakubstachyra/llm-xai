@@ -84,10 +84,12 @@ class RQ2FaithfulnessExperiment:
         operator: Literal["deletion", "embedding_mask", "both"] = "deletion",
         max_k: int = 5,
         random_trials: int = 20,
+        stochastic_num_seeds: int = 3,
         data_path: str = "data/sst2_validation.json",
         output_dir: str = "results/rq2_faithfulness"
     ):
         self.output_dir = output_dir
+        self.stochastic_num_seeds = max(1, int(stochastic_num_seeds))
         self.operator = operator
         if operator == "both":
             base_dir = output_dir[:-5] if output_dir.endswith("_both") else output_dir
@@ -266,6 +268,8 @@ class RQ2FaithfulnessExperiment:
             return False
 
         meta = cached_obj.get("metadata") or {}
+        if bool(meta.get("calibrated", False)) != bool(getattr(self.model, "calibrate_logits", False)):
+            return False
         if isinstance(explainer, IntegratedGradientsExplainer) or (hasattr(explainer, "steps") and hasattr(explainer, "baseline_type")):
             if "steps" in meta:
                 if int(meta["steps"]) != int(explainer.steps):
@@ -605,140 +609,255 @@ class RQ2FaithfulnessExperiment:
                     if not ops_needed:
                         continue
 
-                    cached = cached_orig_attrs.get((sample_id, method_name))
-                    if (
-                        cached is not None
-                        and cached.get("text", "").strip() == text
-                        and int(cached.get("target_class", -1)) == c_star
-                        and self._is_cache_compatible(explainer, cached, overwrite_methods=overwrite_methods)
-                    ):
-                        res = AttributionResult(
-                            tokens=list(cached["tokens"]),
-                            attributions=np.asarray(cached["attributions"], dtype=float),
-                            target_class=c_star,
-                            execution_time=float(cached.get("execution_time", 0.0)),
-                            explainer_name=method_name,
-                            baseline_prob=p_star,
-                            metadata=cached.get("metadata", {}),
-                        )
-                        exp_fwd = int(cached.get("forward_passes", 0))
-                        exp_bwd = int(cached.get("backward_passes", 0))
+                    is_stoch = bool(getattr(explainer, "stochastic", False))
+                    n_seeds = self.stochastic_num_seeds if is_stoch else 1
+                    base_exp_seed = int(getattr(explainer, "seed", seed))
+
+                    if n_seeds == 1:
+                        cached = cached_orig_attrs.get((sample_id, method_name))
+                        if (
+                            cached is not None
+                            and cached.get("text", "").strip() == text
+                            and int(cached.get("target_class", -1)) == c_star
+                            and self._is_cache_compatible(explainer, cached, overwrite_methods=overwrite_methods)
+                        ):
+                            res = AttributionResult(
+                                tokens=list(cached["tokens"]),
+                                attributions=np.asarray(cached["attributions"], dtype=float),
+                                target_class=c_star,
+                                execution_time=float(cached.get("execution_time", 0.0)),
+                                explainer_name=method_name,
+                                baseline_prob=p_star,
+                                metadata=cached.get("metadata", {}),
+                            )
+                            exp_fwd = int(cached.get("forward_passes", 0))
+                            exp_bwd = int(cached.get("backward_passes", 0))
+                        else:
+                            exp_kwargs: Dict[str, Any] = {}
+                            if "baseline_prob" in inspect.signature(explainer.explain).parameters:
+                                exp_kwargs["baseline_prob"] = p_star
+                            c0 = self.model.get_counters()
+                            res = explainer.explain(text, target_class=c_star, **exp_kwargs)
+                            c1 = self.model.get_counters()
+                            exp_fwd = c1["forward_passes"] - c0["forward_passes"]
+                            exp_bwd = c1["backward_passes"] - c0["backward_passes"]
+
+                            rec_meta = dict(res.metadata or {})
+                            rec_meta["calibrated"] = bool(getattr(self.model, "calibrate_logits", False))
+                            if isinstance(explainer, IntegratedGradientsExplainer):
+                                rec_meta.setdefault("steps", explainer.steps)
+                                rec_meta.setdefault("baseline_type", explainer.baseline_type)
+                            elif isinstance(explainer, LIMEExplainer):
+                                rec_meta.setdefault("num_samples", explainer.num_samples)
+                            elif isinstance(explainer, SHAPExplainer):
+                                rec_meta.setdefault("max_evals", explainer.max_evals)
+
+                            attr_rec = {
+                                "sample_id": sample_id,
+                                "model_name": self.model.model_name,
+                                "explainer_name": method_name,
+                                "Canonical_name": method_name,
+                                "variant": "__orig__",
+                                "text": text,
+                                "target_class": int(c_star),
+                                "baseline_prob": float(p_star),
+                                "execution_time": float(res.execution_time),
+                                "forward_passes": int(exp_fwd),
+                                "backward_passes": int(exp_bwd),
+                                "tokens": list(res.tokens),
+                                "attributions": [round(float(x), 6) for x in res.attributions],
+                                "metadata": rec_meta,
+                            }
+                            unflushed_attr_records.append(attr_rec)
+                            cached_orig_attrs[(sample_id, method_name)] = attr_rec
+
+                        aggregate_word_attributions(units, res.attributions, method="signed_sum")
+                        ranked_units = rank_word_units(units, ranking_mode="top_signed")
+                        least_units = rank_word_units(units, ranking_mode="near_zero")
+
+                        for op in ops_needed:
+                            (
+                                c_prob_steps,
+                                c_log_steps,
+                                u_prob_steps,
+                                u_log_steps,
+                                c_least_prob_steps,
+                                c_least_log_steps,
+                            ) = self._eval_ranked_units_for_operator(
+                                op=op,
+                                text=text,
+                                units=units,
+                                ranked_units=ranked_units,
+                                k_list=k_list,
+                                c_star=c_star,
+                                p_star=p_star,
+                                f_star=f_star,
+                                base_embeds=base_embeds,
+                                least_ranked_units=least_units,
+                            )
+
+                            faith_res = evaluate_faithfulness_curves(
+                                k_values=k_list,
+                                c_prob=c_prob_steps,
+                                c_log=c_log_steps,
+                                u_prob=u_prob_steps,
+                                u_log=u_log_steps,
+                                random_aopc_c_prob=rand_aopc_c_prob_by_op[op]
+                            )
+                            additive_g = compute_additive_gap(
+                                faith_res.aopc_comprehensiveness_prob,
+                                rand_aopc_c_prob_by_op[op]
+                            )
+                            aopc_least_prob = calculate_aopc(c_least_prob_steps)
+                            aopc_least_log = calculate_aopc(c_least_log_steps)
+                            gap_g_least = float(faith_res.aopc_comprehensiveness_prob - aopc_least_prob)
+
+                            row = {
+                                "sample_id": sample_id,
+                                "device_name": getattr(self.model, "device_name", "Unknown"),
+                                "explainer_name": method_name,
+                                "operator": op,
+                                "original_text": text,
+                                "true_label": true_label,
+                                "target_class": c_star,
+                                "is_correct": bool(c_star == true_label),
+                                "baseline_prob": p_star,
+                                "prediction_entropy": pred_entropy,
+                                "num_words": len(units),
+                                "max_k": eff_k,
+                                "n_seeds": 1,
+                                "aopc_c_prob": faith_res.aopc_comprehensiveness_prob,
+                                "aopc_c_log": faith_res.aopc_comprehensiveness_log,
+                                "aopc_u_prob": faith_res.aopc_sufficiency_prob,
+                                "aopc_u_log": faith_res.aopc_sufficiency_log,
+                                "aopc_least_prob": aopc_least_prob,
+                                "aopc_least_log": aopc_least_log,
+                                "gap_g": additive_g,
+                                "gap_g_rel": faith_res.relative_gap_g,
+                                "gap_g_least": gap_g_least,
+                                "harmonization_h": faith_res.harmonization_h,
+                                "execution_time": res.execution_time,
+                                "forward_passes": exp_fwd,
+                                "backward_passes": exp_bwd,
+                            }
+                            for i, k in enumerate(k_list):
+                                row[f"c_prob_k{k}"] = c_prob_steps[i]
+                                row[f"u_prob_k{k}"] = u_prob_steps[i]
+                                row[f"c_least_prob_k{k}"] = c_least_prob_steps[i]
+                                row[f"c_log_k{k}"] = c_log_steps[i]
+                                row[f"u_log_k{k}"] = u_log_steps[i]
+                                row[f"c_least_log_k{k}"] = c_least_log_steps[i]
+
+                            unflushed_records[op].append(row)
+                            completed_keys[op].add((sample_id, method_name, op))
                     else:
-                        exp_kwargs: Dict[str, Any] = {}
-                        if "baseline_prob" in inspect.signature(explainer.explain).parameters:
-                            exp_kwargs["baseline_prob"] = p_star
-                        c0 = self.model.get_counters()
-                        res = explainer.explain(text, target_class=c_star, **exp_kwargs)
-                        c1 = self.model.get_counters()
-                        exp_fwd = c1["forward_passes"] - c0["forward_passes"]
-                        exp_bwd = c1["backward_passes"] - c0["backward_passes"]
+                        # Multi-seed averaging for stochastic explainers (R independent seeds per review)
+                        seed_rows_by_op: Dict[str, List[Dict[str, Any]]] = {op: [] for op in ops_needed}
+                        has_seed_arg = "seed" in inspect.signature(explainer.explain).parameters
+                        has_bprob_arg = "baseline_prob" in inspect.signature(explainer.explain).parameters
 
-                        rec_meta = dict(res.metadata or {})
-                        if isinstance(explainer, IntegratedGradientsExplainer):
-                            rec_meta.setdefault("steps", explainer.steps)
-                            rec_meta.setdefault("baseline_type", explainer.baseline_type)
-                        elif isinstance(explainer, LIMEExplainer):
-                            rec_meta.setdefault("num_samples", explainer.num_samples)
-                        elif isinstance(explainer, SHAPExplainer):
-                            rec_meta.setdefault("max_evals", explainer.max_evals)
+                        for r_idx in range(n_seeds):
+                            run_seed = base_exp_seed + r_idx
+                            exp_kwargs = {}
+                            if has_bprob_arg:
+                                exp_kwargs["baseline_prob"] = p_star
+                            if has_seed_arg:
+                                exp_kwargs["seed"] = run_seed
 
-                        attr_rec = {
-                            "sample_id": sample_id,
-                            "model_name": self.model.model_name,
-                            "explainer_name": method_name,
-                            "Canonical_name": method_name,
-                            "variant": "__orig__",
-                            "text": text,
-                            "target_class": int(c_star),
-                            "baseline_prob": float(p_star),
-                            "execution_time": float(res.execution_time),
-                            "forward_passes": int(exp_fwd),
-                            "backward_passes": int(exp_bwd),
-                            "tokens": list(res.tokens),
-                            "attributions": [round(float(x), 6) for x in res.attributions],
-                            "metadata": rec_meta,
-                        }
-                        unflushed_attr_records.append(attr_rec)
-                        cached_orig_attrs[(sample_id, method_name)] = attr_rec
+                            c0 = self.model.get_counters()
+                            res = explainer.explain(text, target_class=c_star, **exp_kwargs)
+                            c1 = self.model.get_counters()
+                            exp_fwd = c1["forward_passes"] - c0["forward_passes"]
+                            exp_bwd = c1["backward_passes"] - c0["backward_passes"]
 
-                    aggregate_word_attributions(units, res.attributions, method="signed_sum")
-                    ranked_units = rank_word_units(units, ranking_mode="top_signed")
-                    least_units = rank_word_units(units, ranking_mode="near_zero")
+                            aggregate_word_attributions(units, res.attributions, method="signed_sum")
+                            ranked_units = rank_word_units(units, ranking_mode="top_signed")
+                            least_units = rank_word_units(units, ranking_mode="near_zero")
 
-                    for op in ops_needed:
-                        (
-                            c_prob_steps,
-                            c_log_steps,
-                            u_prob_steps,
-                            u_log_steps,
-                            c_least_prob_steps,
-                            c_least_log_steps,
-                        ) = self._eval_ranked_units_for_operator(
-                            op=op,
-                            text=text,
-                            units=units,
-                            ranked_units=ranked_units,
-                            k_list=k_list,
-                            c_star=c_star,
-                            p_star=p_star,
-                            f_star=f_star,
-                            base_embeds=base_embeds,
-                            least_ranked_units=least_units,
-                        )
+                            for op in ops_needed:
+                                (
+                                    c_prob_steps,
+                                    c_log_steps,
+                                    u_prob_steps,
+                                    u_log_steps,
+                                    c_least_prob_steps,
+                                    c_least_log_steps,
+                                ) = self._eval_ranked_units_for_operator(
+                                    op=op,
+                                    text=text,
+                                    units=units,
+                                    ranked_units=ranked_units,
+                                    k_list=k_list,
+                                    c_star=c_star,
+                                    p_star=p_star,
+                                    f_star=f_star,
+                                    base_embeds=base_embeds,
+                                    least_ranked_units=least_units,
+                                )
+                                faith_res = evaluate_faithfulness_curves(
+                                    k_values=k_list,
+                                    c_prob=c_prob_steps,
+                                    c_log=c_log_steps,
+                                    u_prob=u_prob_steps,
+                                    u_log=u_log_steps,
+                                    random_aopc_c_prob=rand_aopc_c_prob_by_op[op],
+                                )
+                                additive_g = compute_additive_gap(
+                                    faith_res.aopc_comprehensiveness_prob,
+                                    rand_aopc_c_prob_by_op[op],
+                                )
+                                aopc_least_prob = calculate_aopc(c_least_prob_steps)
+                                aopc_least_log = calculate_aopc(c_least_log_steps)
+                                gap_g_least = float(faith_res.aopc_comprehensiveness_prob - aopc_least_prob)
 
-                        faith_res = evaluate_faithfulness_curves(
-                            k_values=k_list,
-                            c_prob=c_prob_steps,
-                            c_log=c_log_steps,
-                            u_prob=u_prob_steps,
-                            u_log=u_log_steps,
-                            random_aopc_c_prob=rand_aopc_c_prob_by_op[op]
-                        )
-                        additive_g = compute_additive_gap(
-                            faith_res.aopc_comprehensiveness_prob,
-                            rand_aopc_c_prob_by_op[op]
-                        )
-                        aopc_least_prob = calculate_aopc(c_least_prob_steps)
-                        aopc_least_log = calculate_aopc(c_least_log_steps)
-                        gap_g_least = float(faith_res.aopc_comprehensiveness_prob - aopc_least_prob)
+                                s_metrics: Dict[str, float] = {
+                                    "aopc_c_prob": float(faith_res.aopc_comprehensiveness_prob),
+                                    "aopc_c_log": float(faith_res.aopc_comprehensiveness_log),
+                                    "aopc_u_prob": float(faith_res.aopc_sufficiency_prob),
+                                    "aopc_u_log": float(faith_res.aopc_sufficiency_log),
+                                    "aopc_least_prob": float(aopc_least_prob),
+                                    "aopc_least_log": float(aopc_least_log),
+                                    "gap_g": float(additive_g),
+                                    "gap_g_rel": float(faith_res.relative_gap_g),
+                                    "gap_g_least": float(gap_g_least),
+                                    "harmonization_h": float(faith_res.harmonization_h),
+                                    "execution_time": float(res.execution_time),
+                                    "forward_passes": float(exp_fwd),
+                                    "backward_passes": float(exp_bwd),
+                                }
+                                for i, k in enumerate(k_list):
+                                    s_metrics[f"c_prob_k{k}"] = float(c_prob_steps[i])
+                                    s_metrics[f"u_prob_k{k}"] = float(u_prob_steps[i])
+                                    s_metrics[f"c_least_prob_k{k}"] = float(c_least_prob_steps[i])
+                                    s_metrics[f"c_log_k{k}"] = float(c_log_steps[i])
+                                    s_metrics[f"u_log_k{k}"] = float(u_log_steps[i])
+                                    s_metrics[f"c_least_log_k{k}"] = float(c_least_log_steps[i])
+                                seed_rows_by_op[op].append(s_metrics)
 
-                        row = {
-                            "sample_id": sample_id,
-                            "device_name": getattr(self.model, "device_name", "Unknown"),
-                            "explainer_name": method_name,
-                            "operator": op,
-                            "original_text": text,
-                            "true_label": true_label,
-                            "target_class": c_star,
-                            "is_correct": bool(c_star == true_label),
-                            "baseline_prob": p_star,
-                            "prediction_entropy": pred_entropy,
-                            "num_words": len(units),
-                            "max_k": eff_k,
-                            "aopc_c_prob": faith_res.aopc_comprehensiveness_prob,
-                            "aopc_c_log": faith_res.aopc_comprehensiveness_log,
-                            "aopc_u_prob": faith_res.aopc_sufficiency_prob,
-                            "aopc_u_log": faith_res.aopc_sufficiency_log,
-                            "aopc_least_prob": aopc_least_prob,
-                            "aopc_least_log": aopc_least_log,
-                            "gap_g": additive_g,
-                            "gap_g_rel": faith_res.relative_gap_g,
-                            "gap_g_least": gap_g_least,
-                            "harmonization_h": faith_res.harmonization_h,
-                            "execution_time": res.execution_time,
-                            "forward_passes": exp_fwd,
-                            "backward_passes": exp_bwd,
-                        }
-                        for i, k in enumerate(k_list):
-                            row[f"c_prob_k{k}"] = c_prob_steps[i]
-                            row[f"u_prob_k{k}"] = u_prob_steps[i]
-                            row[f"c_least_prob_k{k}"] = c_least_prob_steps[i]
-                            row[f"c_log_k{k}"] = c_log_steps[i]
-                            row[f"u_log_k{k}"] = u_log_steps[i]
-                            row[f"c_least_log_k{k}"] = c_least_log_steps[i]
-
-                        unflushed_records[op].append(row)
-                        completed_keys[op].add((sample_id, method_name, op))
+                        for op in ops_needed:
+                            s_list = seed_rows_by_op[op]
+                            avg_metrics = {
+                                key: float(np.mean([sr[key] for sr in s_list]))
+                                for key in s_list[0].keys()
+                            }
+                            row = {
+                                "sample_id": sample_id,
+                                "device_name": getattr(self.model, "device_name", "Unknown"),
+                                "explainer_name": method_name,
+                                "operator": op,
+                                "original_text": text,
+                                "true_label": true_label,
+                                "target_class": c_star,
+                                "is_correct": bool(c_star == true_label),
+                                "baseline_prob": p_star,
+                                "prediction_entropy": pred_entropy,
+                                "num_words": len(units),
+                                "max_k": eff_k,
+                                "n_seeds": n_seeds,
+                                **avg_metrics,
+                            }
+                            unflushed_records[op].append(row)
+                            completed_keys[op].add((sample_id, method_name, op))
 
                 del base_embeds
                 samples_processed_in_this_run += 1

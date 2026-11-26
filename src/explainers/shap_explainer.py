@@ -14,12 +14,14 @@ class SHAPExplainer(BaseExplainer):
         self,
         model_wrapper,
         max_evals: int = 100,
+        evals_per_token: Optional[int] = None,
         mask_token_id: Optional[int] = None,
         seed: int = 42,
         mask_prompt_template: bool = True,
     ):
         super().__init__(model_wrapper)
         self.max_evals = max_evals
+        self.evals_per_token = evals_per_token
         self.seed = seed
         self.mask_prompt_template = mask_prompt_template
         if mask_token_id is not None:
@@ -91,7 +93,12 @@ class SHAPExplainer(BaseExplainer):
                 _predict_review_only, background, seed=effective_seed
             )
             min_evals = 2 * num_review + 1
-            evals = max(self.max_evals, min_evals)
+            base_budget = (
+                int(self.evals_per_token) * num_review
+                if self.evals_per_token is not None
+                else self.max_evals
+            )
+            evals = max(base_budget, min_evals)
             shap_values = explainer(review_ids, max_evals=evals, batch_size=shap_batch_size)
 
             values = shap_values.values[0]

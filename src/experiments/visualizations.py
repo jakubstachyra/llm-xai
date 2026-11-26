@@ -31,37 +31,57 @@ def plot_rq1_metric_distribution(
 
     fig, ax = plt.subplots(figsize=(12, 5.5), dpi=300)
     
-    # Define color palette
-    colors = {"SHAP": "#2b5c8f", "Occlusion": "#d95f02", "Integrated": "#1b9e77", "Default": "#7570b3"}
-
+    # Distinct colorblind-friendly palette for all 5 XAI methods
+    colors = {
+        "Occlusion": "#d95f02",
+        "GradientXInput": "#e7298a",
+        "Gradient x Input": "#e7298a",
+        "IntegratedGradients": "#1b9e77",
+        "Integrated Gradients": "#1b9e77",
+        "LIME": "#7570b3",
+        "SHAP": "#2b5c8f",
+    }
+    fallback_colors = ["#66a61e", "#e6ab02", "#a6761d", "#666666"]
 
     x = np.arange(len(perturbations))
     num_methods = len(methods)
     bar_width = 0.8 / num_methods
 
+    is_bounded_01 = metric.startswith("jaccard")
+    y_min_bound = 0.0 if is_bounded_01 else -1.0
+
     for i, method in enumerate(methods):
         method_means = []
-        method_stds = []
-        
+        err_low = []
+        err_high = []
+
         for p in perturbations:
-            subset = df_raw[(df_raw["explainer_name"] == method) & (df_raw["perturbation_name"] == p)][metric]
-            method_means.append(subset.mean() if len(subset) > 0 else 0.0)
-            method_stds.append(subset.std() if len(subset) > 0 else 0.0)
+            subset = df_raw[(df_raw["explainer_name"] == method) & (df_raw["perturbation_name"] == p)][metric].dropna()
+            if len(subset) > 0:
+                m_val = float(subset.mean())
+                ci95 = float(1.96 * subset.std(ddof=1) / np.sqrt(len(subset))) if len(subset) > 1 else 0.0
+                lo = max(0.0, m_val - max(y_min_bound, m_val - ci95))
+                hi = max(0.0, min(1.0, m_val + ci95) - m_val)
+            else:
+                m_val, lo, hi = 0.0, 0.0, 0.0
+            method_means.append(m_val)
+            err_low.append(lo)
+            err_high.append(hi)
 
         offset = (i - (num_methods - 1) / 2) * bar_width
-        color = colors.get(method.split()[0], colors["Default"])
-        
+        color = colors.get(method) or colors.get(method.split()[0]) or fallback_colors[i % len(fallback_colors)]
+
         ax.bar(
-            x + offset, 
-            method_means, 
-            yerr=method_stds, 
-            width=bar_width, 
+            x + offset,
+            method_means,
+            yerr=[err_low, err_high],
+            width=bar_width,
             label=method,
-            color=color, 
-            capsize=4, 
-            alpha=0.88,
+            color=color,
+            capsize=3,
+            alpha=0.90,
             edgecolor="black",
-            linewidth=0.5
+            linewidth=0.5,
         )
 
     ax.set_ylabel(metric_label, fontsize=12, fontweight="normal")
@@ -101,9 +121,13 @@ def plot_rq1_jaccard_k_curves(
 
     # Style configuration per explainer for visual clarity and accessibility
     style_specs = {
-        "Occlusion": {"color": "#2b5c8f", "linestyle": "-", "marker": "o"},
-        "IntegratedGradients": {"color": "#d95f02", "linestyle": "--", "marker": "s"},
-        "SHAP": {"color": "#1b9e77", "linestyle": ":", "marker": "^"},
+        "Occlusion": {"color": "#d95f02", "linestyle": "-", "marker": "o"},
+        "GradientXInput": {"color": "#e7298a", "linestyle": "-.", "marker": "D"},
+        "Gradient x Input": {"color": "#e7298a", "linestyle": "-.", "marker": "D"},
+        "IntegratedGradients": {"color": "#1b9e77", "linestyle": "--", "marker": "s"},
+        "Integrated Gradients": {"color": "#1b9e77", "linestyle": "--", "marker": "s"},
+        "LIME": {"color": "#7570b3", "linestyle": "-", "marker": "v"},
+        "SHAP": {"color": "#2b5c8f", "linestyle": ":", "marker": "^"},
     }
     fallback_palette = ["#7570b3", "#e7298a", "#66a61e", "#e6ab02"]
     fallback_linestyles = ["-.", "-", "--", ":"]

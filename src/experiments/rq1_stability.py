@@ -163,6 +163,61 @@ class RQ1StabilityExperiment:
             os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "rq1_perturbation_decisions.csv")
             if checkpoint_path else None
         )
+        attr_jsonl_path = (
+            os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "rq1_attributions.jsonl")
+            if checkpoint_path else None
+        )
+
+        # Load decisions first so resume knows the exact set of preserved perturbations per sample
+        preserved_perts_by_sample: Dict[int, set] = {}
+        if decisions_csv_path and os.path.exists(decisions_csv_path):
+            try:
+                df_dec_existing = pd.read_csv(decisions_csv_path)
+                if len(df_dec_existing) > 0 and "sample_id" in df_dec_existing.columns:
+                    decision_records = df_dec_existing.to_dict("records")
+                    for r in decision_records:
+                        sid_d = int(r["sample_id"])
+                        pname_d = str(r["perturbation_name"])
+                        logged_decision_pairs.add((sid_d, pname_d))
+                        preserved_perts_by_sample.setdefault(sid_d, set())
+                        if bool(r.get("is_preserved", False)):
+                            preserved_perts_by_sample[sid_d].add(pname_d)
+                    for sid_d, pres_set in preserved_perts_by_sample.items():
+                        if len(pres_set) == 0:
+                            all_flipped_samples.add(int(sid_d))
+            except Exception:
+                decision_records = []
+                preserved_perts_by_sample = {}
+
+        # Track already saved records in rq1_attributions.jsonl to prevent duplicate lines on resume
+        logged_attr_keys: set = set()
+        if attr_jsonl_path and os.path.exists(attr_jsonl_path):
+            try:
+                if overwrite_methods:
+                    kept_lines = []
+                    with open(attr_jsonl_path, "r", encoding="utf-8") as f_aj:
+                        for line in f_aj:
+                            s_line = line.strip()
+                            if not s_line:
+                                continue
+                            obj = json.loads(s_line)
+                            if str(obj.get("explainer_name", "")) not in overwrite_methods:
+                                key_a = (int(obj["sample_id"]), str(obj["explainer_name"]), str(obj.get("variant", "__orig__")))
+                                if key_a not in logged_attr_keys:
+                                    logged_attr_keys.add(key_a)
+                                    kept_lines.append(json.dumps(obj, ensure_ascii=False) + "\n")
+                    with open(attr_jsonl_path, "w", encoding="utf-8") as f_aj:
+                        f_aj.writelines(kept_lines)
+                else:
+                    with open(attr_jsonl_path, "r", encoding="utf-8") as f_aj:
+                        for line in f_aj:
+                            s_line = line.strip()
+                            if not s_line:
+                                continue
+                            obj = json.loads(s_line)
+                            logged_attr_keys.add((int(obj["sample_id"]), str(obj["explainer_name"]), str(obj.get("variant", "__orig__"))))
+            except Exception:
+                logged_attr_keys = set()
 
         # Load existing checkpoint if available
         if checkpoint_path and os.path.exists(checkpoint_path):
@@ -175,34 +230,27 @@ class RQ1StabilityExperiment:
                     print(f"[RQ1 Checkpoint] Usunięto {before_len - len(df_existing)} starych wierszy dla nadpisywanych metod: {overwrite_methods}")
                 if len(df_existing) > 0 and "sample_id" in df_existing.columns and "explainer_name" in df_existing.columns:
                     records = df_existing.to_dict("records")
+                    seen_sample_explainers: set = set()
                     for r in records:
                         sid = int(r["sample_id"])
                         ename = str(r["explainer_name"])
                         pname = str(r.get("perturbation_name", ""))
                         completed_units.add((sid, ename, pname))
                         if pname != NOISE_FLOOR_NAME:
-                            # If any non-control perturbation was recorded for (sample_id, explainer_name),
-                            # all perturbations for that (sample_id, explainer_name) were already evaluated
-                            # in a single atomic loop (missing perturbations are decision flips).
+                            seen_sample_explainers.add((sid, ename))
+                    for sid, ename in seen_sample_explainers:
+                        if sid in preserved_perts_by_sample:
+                            req_perts = preserved_perts_by_sample[sid]
+                            if all((sid, ename, p_req) in completed_units for p_req in req_perts):
+                                fully_completed_sample_explainers.add((sid, ename))
+                        else:
+                            # Legacy checkpoint without decisions CSV: treat recorded sample-explainer as complete
                             fully_completed_sample_explainers.add((sid, ename))
                     distinct_samples = set(r["sample_id"] for r in records)
                     print(f"[RQ1 Checkpoint] Wczytano {len(records)} rekordów z checkpointa ({len(distinct_samples)} częściowo lub w pełni gotowych próbek).")
             except Exception as e:
                 print(f"[RQ1 Checkpoint] Ostrzeżenie przy wczytywaniu checkpointa ({e}). Start od zera.")
                 records = []
-
-        if decisions_csv_path and os.path.exists(decisions_csv_path):
-            try:
-                df_dec_existing = pd.read_csv(decisions_csv_path)
-                if len(df_dec_existing) > 0 and "sample_id" in df_dec_existing.columns:
-                    decision_records = df_dec_existing.to_dict("records")
-                    for r in decision_records:
-                        logged_decision_pairs.add((int(r["sample_id"]), str(r["perturbation_name"])))
-                    for sid, grp in df_dec_existing.groupby("sample_id"):
-                        if len(grp) >= 1 and not grp["is_preserved"].astype(bool).any():
-                            all_flipped_samples.add(int(sid))
-            except Exception:
-                decision_records = []
 
         total_pairs = 0
         preserved_pairs = 0
@@ -216,10 +264,6 @@ class RQ1StabilityExperiment:
         unflushed_records: List[Dict[str, Any]] = []
         unflushed_decision_records: List[Dict[str, Any]] = []
         unflushed_attr_records: List[Dict[str, Any]] = []
-        attr_jsonl_path = (
-            os.path.join(os.path.dirname(os.path.abspath(checkpoint_path)), "rq1_attributions.jsonl")
-            if checkpoint_path else None
-        )
 
         def _flush_csv_safe(csv_path: str, chunk_records: List[Dict[str, Any]]):
             if not chunk_records:
@@ -404,6 +448,7 @@ class RQ1StabilityExperiment:
                     orig_time = orig_res.execution_time
                     orig_vram_mb = (torch.cuda.max_memory_allocated() / (1024 * 1024)) if torch.cuda.is_available() else 0.0
                     orig_meta = dict(orig_res.metadata or {})
+                    orig_meta["calibrated"] = bool(getattr(self.model, "calibrate_logits", False))
                     if hasattr(explainer, "steps"):
                         orig_meta.setdefault("steps", getattr(explainer, "steps"))
                     if hasattr(explainer, "baseline_type"):
@@ -413,29 +458,35 @@ class RQ1StabilityExperiment:
                     if hasattr(explainer, "max_evals"):
                         orig_meta.setdefault("max_evals", getattr(explainer, "max_evals"))
 
-                    unflushed_attr_records.append({
-                        "sample_id": sample_idx,
-                        "model_name": self.model.model_name,
-                        "explainer_name": explainer_name,
-                        "Canonical_name": explainer.explainer_name,
-                        "variant": "__orig__",
-                        "text": text,
-                        "target_class": int(pred_class),
-                        "baseline_prob": float(p_target),
-                        "execution_time": float(orig_time),
-                        "forward_passes": int(orig_fwd),
-                        "backward_passes": int(orig_bwd),
-                        "tokens": list(orig_res.tokens),
-                        "attributions": [round(float(x), 6) for x in orig_res.attributions],
-                        "metadata": orig_meta,
-                    })
+                    exp_new_records: List[Dict[str, Any]] = []
+                    exp_attr_records: List[Dict[str, Any]] = []
+                    exp_completed_units: List[Tuple[int, str, str]] = []
+
+                    orig_attr_key = (sample_idx, explainer_name, "__orig__")
+                    if orig_attr_key not in logged_attr_keys:
+                        exp_attr_records.append({
+                            "sample_id": sample_idx,
+                            "model_name": self.model.model_name,
+                            "explainer_name": explainer_name,
+                            "Canonical_name": explainer.explainer_name,
+                            "variant": "__orig__",
+                            "text": text,
+                            "target_class": int(pred_class),
+                            "baseline_prob": float(p_target),
+                            "execution_time": float(orig_time),
+                            "forward_passes": int(orig_fwd),
+                            "backward_passes": int(orig_bwd),
+                            "tokens": list(orig_res.tokens),
+                            "attributions": [round(float(x), 6) for x in orig_res.attributions],
+                            "metadata": orig_meta,
+                        })
 
                     if sample_idx == 0:
                         self.last_explanations_cache[f"{explainer_name}_orig"] = orig_res
 
                     for p_name, _ in perts_to_run:
                         if filter_decision_preserved and not pert_status[p_name]["is_preserved"]:
-                            completed_units.add((sample_idx, explainer_name, p_name))
+                            exp_completed_units.append((sample_idx, explainer_name, p_name))
 
                     for pert_name, p_info in active_perts_to_run:
                         pert_text = p_info["text"]
@@ -457,10 +508,11 @@ class RQ1StabilityExperiment:
                         pert_res = explainer.explain(pert_text, target_class=pred_class, **pert_kwargs)
                         c1 = self.model.get_counters()
                         pert_vram_mb = (torch.cuda.max_memory_allocated() / (1024 * 1024)) if torch.cuda.is_available() else 0.0
-                        pert_meta = pert_res.metadata or {}
+                        pert_meta = dict(pert_res.metadata or {})
+                        pert_meta["calibrated"] = bool(getattr(self.model, "calibrate_logits", False))
 
-                        if save_perturbed_attributions:
-                            unflushed_attr_records.append({
+                        if save_perturbed_attributions and (sample_idx, explainer_name, pert_name) not in logged_attr_keys:
+                            exp_attr_records.append({
                                 "sample_id": sample_idx,
                                 "model_name": self.model.model_name,
                                 "explainer_name": explainer_name,
@@ -526,9 +578,8 @@ class RQ1StabilityExperiment:
                             "pert_forward_passes": c1["forward_passes"] - c0["forward_passes"],
                             "pert_backward_passes": c1["backward_passes"] - c0["backward_passes"]
                         }
-                        records.append(row)
-                        sample_new_records.append(row)
-                        completed_units.add((sample_idx, explainer_name, pert_name))
+                        exp_new_records.append(row)
+                        exp_completed_units.append((sample_idx, explainer_name, pert_name))
 
                     # Noise-floor control: same text, independent random seed
                     if run_control:
@@ -582,9 +633,20 @@ class RQ1StabilityExperiment:
                             "pert_forward_passes": c1["forward_passes"] - c0["forward_passes"],
                             "pert_backward_passes": c1["backward_passes"] - c0["backward_passes"]
                         }
-                        records.append(row)
-                        sample_new_records.append(row)
-                        completed_units.add((sample_idx, explainer_name, NOISE_FLOOR_NAME))
+                        exp_new_records.append(row)
+                        exp_completed_units.append((sample_idx, explainer_name, NOISE_FLOOR_NAME))
+
+                    # Commit explainer atomically once all its perturbations finished cleanly
+                    records.extend(exp_new_records)
+                    sample_new_records.extend(exp_new_records)
+                    for u_key in exp_completed_units:
+                        completed_units.add(u_key)
+                    fully_completed_sample_explainers.add((sample_idx, explainer_name))
+                    for a_rec in exp_attr_records:
+                        a_key = (int(a_rec["sample_id"]), str(a_rec["explainer_name"]), str(a_rec["variant"]))
+                        if a_key not in logged_attr_keys:
+                            logged_attr_keys.add(a_key)
+                            unflushed_attr_records.append(a_rec)
 
                     if torch.cuda.is_available() and getattr(explainer, "ig_batch_size", None) is not None:
                         torch.cuda.empty_cache()

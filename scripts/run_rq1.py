@@ -72,14 +72,14 @@ def main():
     parser.add_argument(
         "--max-evals", 
         type=int, 
-        default=1200, 
-        help="Maksymalna liczba ewaluacji dla permutacyjnego SHAP (domyślnie: 1200)"
+        default=2500, 
+        help="Maksymalna liczba ewaluacji dla permutacyjnego SHAP (domyślnie: 2500)"
     )
     parser.add_argument(
         "--ig-steps",
         type=int,
-        default=50,
-        help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 50)"
+        default=100,
+        help="Liczba kroków integracji numerycznej dla Integrated Gradients (domyślnie: 100)"
     )
     parser.add_argument(
         "--ig-baseline",
@@ -91,8 +91,8 @@ def main():
     parser.add_argument(
         "--lime-samples",
         type=int,
-        default=500,
-        help="Liczba próbek sąsiedztwa dla LIME (domyślnie: 500)"
+        default=1000,
+        help="Liczba próbek sąsiedztwa dla LIME (domyślnie: 1000)"
     )
     parser.add_argument(
         "--no-filter-preserved",
@@ -139,6 +139,11 @@ def main():
         default=None,
         help="Opcjonalne ręczne nadpisanie rozmiaru mikro-paczki GPU (domyślnie automatyczne na podstawie VRAM)."
     )
+    parser.add_argument(
+        "--no-calibrate",
+        action="store_true",
+        help="Wyłącza kalibrację kontekstową logitów (Zhao et al., 2021); domyślnie kalibracja WŁĄCZONA."
+    )
 
     args = parser.parse_args()
 
@@ -150,10 +155,12 @@ def main():
         output_dir = os.path.join(PROJECT_ROOT, output_dir)
 
     filter_preserved = not args.no_filter_preserved
+    calibrate_logits = not args.no_calibrate
 
     print("=" * 70)
     print("LLM XAI EVALUATION FRAMEWORK - RESEARCH QUESTION 1 (STABILITY)")
     print(f"Model: {args.model}")
+    print(f"Kalibracja kontekstowa logitów (Zhao et al., 2021): {'TAK' if calibrate_logits else 'NIE'}")
     print(f"Próbki SST-2: {args.samples} (seed={args.seed})")
     print(f"Filtr par ze spójną predykcją (Decision-Preserved): {'TAK' if filter_preserved else 'NIE'}")
     print(f"Wybrane metody: {', '.join(selected_methods)}")
@@ -169,7 +176,11 @@ def main():
         model_name = "microsoft/phi-2"
 
     # 1. Initialize model
-    model = SentimentCausalLM(model_name=model_name, sub_batch_size=args.sub_batch_size)
+    model = SentimentCausalLM(
+        model_name=model_name,
+        sub_batch_size=args.sub_batch_size,
+        calibrate_logits=calibrate_logits,
+    )
 
     # 2. Initialize explainers
     explainers = []

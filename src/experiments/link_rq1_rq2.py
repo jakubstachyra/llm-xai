@@ -98,7 +98,9 @@ def generate_joint_rq1_rq2_analysis(
         if "perturbation_name" in df_rq1.columns:
             if "perturbation_category" in df_rq1.columns:
                 df_rq1 = df_rq1[df_rq1["perturbation_category"] != "control"]
-            df_rq1 = df_rq1[~df_rq1["perturbation_name"].isin(["lowercase", "add_period"])]
+            if "spearman_std" in df_rq1.columns:
+                noop_mask = df_rq1["perturbation_name"].isin(["lowercase", "add_period"]) & (df_rq1["spearman_std"].fillna(1.0) == 0.0)
+                df_rq1 = df_rq1[~noop_mask]
 
             agg_dict = {
                 "spearman_mean": "mean",
