@@ -36,6 +36,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from src.models import SentimentCausalLM
+from src.hardware_tracker import HardwareSessionTracker
 from src.explainers.shap_explainer import SHAPExplainer
 from src.explainers.lime_explainer import LIMEExplainer
 from src.explainers.integrated_gradients import IntegratedGradientsExplainer
@@ -148,66 +149,81 @@ def run_pilot(
     done_now = 0
     t_start_all = time.time()
 
-    for s in samples:
-        sid = s["sample_id"]
-        text = s["sentence"]
-        n_tok = s["n_tokens"]
-        lbin = s["length_bin"]
-        target_cls = frozen_preds[sid]
+    tracker = HardwareSessionTracker(
+        model,
+        experiment_name=f"Stage0-Pilot-Stochastic-{model_name.split('/')[-1]}",
+        num_samples=len(samples),
+    )
+    tracker.start()
+    try:
+        for s in samples:
+            sid = s["sample_id"]
+            text = s["sentence"]
+            n_tok = s["n_tokens"]
+            lbin = s["length_bin"]
+            target_cls = frozen_preds[sid]
 
-        for family, plabel, pval, builder in configs:
-            if (sid, family, plabel) in done_keys:
+            for family, plabel, pval, builder in configs:
+                if (sid, family, plabel) in done_keys:
+                    done_now += 1
+                    continue
+
+                explainer = builder(model)
+                rs, re_, _ = model.find_review_span(text)
+
+                seed_attrs = []
+                seed_times = []
+                seed_fwds = []
+
+                for sd in seeds:
+                    fwd_before = int(model.forward_pass_count)
+                    res = explainer.explain(text, target_class=target_cls, seed=sd)
+                    span_attr = np.asarray(res.attributions[rs:re_], dtype=np.float64)
+                    seed_attrs.append(span_attr)
+                    seed_times.append(float(res.execution_time))
+                    seed_fwds.append(int(model.forward_pass_count) - fwd_before)
+
+                rho_rep = pairwise_spearman(seed_attrs)
+                row = {
+                    "sample_id": sid,
+                    "n_tokens": n_tok,
+                    "length_bin": lbin,
+                    "method_family": family,
+                    "param_label": plabel,
+                    "param_value": pval,
+                    "n_seeds": len(seeds),
+                    "n_pairs": len(seeds) * (len(seeds) - 1) // 2,
+                    "rep_spearman_mean": rho_rep,
+                    "time_s_mean": float(np.mean(seed_times)),
+                    "time_s_std": float(np.std(seed_times, ddof=1)) if len(seed_times) > 1 else 0.0,
+                    "forward_passes_mean": float(np.mean(seed_fwds)),
+                }
+
+                pd.DataFrame([row]).to_csv(
+                    output_csv,
+                    mode="a",
+                    header=not os.path.exists(output_csv),
+                    index=False,
+                )
+                done_keys.add((sid, family, plabel))
                 done_now += 1
-                continue
 
-            explainer = builder(model)
-            rs, re_, _ = model.find_review_span(text)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-            seed_attrs = []
-            seed_times = []
-            seed_fwds = []
-
-            for sd in seeds:
-                model.reset_counters()
-                res = explainer.explain(text, target_class=target_cls, seed=sd)
-                span_attr = np.asarray(res.attributions[rs:re_], dtype=np.float64)
-                seed_attrs.append(span_attr)
-                seed_times.append(float(res.execution_time))
-                seed_fwds.append(int(model.forward_pass_count))
-
-            rho_rep = pairwise_spearman(seed_attrs)
-            row = {
-                "sample_id": sid,
-                "n_tokens": n_tok,
-                "length_bin": lbin,
-                "method_family": family,
-                "param_label": plabel,
-                "param_value": pval,
-                "n_seeds": len(seeds),
-                "n_pairs": len(seeds) * (len(seeds) - 1) // 2,
-                "rep_spearman_mean": rho_rep,
-                "time_s_mean": float(np.mean(seed_times)),
-                "time_s_std": float(np.std(seed_times, ddof=1)) if len(seed_times) > 1 else 0.0,
-                "forward_passes_mean": float(np.mean(seed_fwds)),
-            }
-
-            pd.DataFrame([row]).to_csv(
-                output_csv,
-                mode="a",
-                header=not os.path.exists(output_csv),
-                index=False,
-            )
-            done_keys.add((sid, family, plabel))
-            done_now += 1
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            elapsed = time.time() - t_start_all
-            print(
-                f"[{done_now}/{total_units}] sid={sid} (n={n_tok}, {lbin}) | {family} {plabel} | "
-                f"rho_rep={rho_rep:.3f} | t={row['time_s_mean']:.2f}s | elapsed={elapsed/60:.1f}m"
-            )
+                elapsed = time.time() - t_start_all
+                print(
+                    f"[{done_now}/{total_units}] sid={sid} (n={n_tok}, {lbin}) | {family} {plabel} | "
+                    f"rho_rep={rho_rep:.3f} | t={row['time_s_mean']:.2f}s | elapsed={elapsed/60:.1f}m"
+                )
+    finally:
+        stats = tracker.stop(num_samples=len(samples))
+        tracker.log_session(
+            output_csv=os.path.join(PROJECT_ROOT, "results", "hardware_session_log.csv"),
+            stats=stats,
+            extra_csv_paths=[os.path.join(os.path.dirname(output_csv), "hardware_session_log_pilot.csv")],
+        )
+        tracker.print_summary(stats=stats)
 
     print(f"[Done] Raw 5-seed pilot saved to {output_csv}")
 
@@ -225,54 +241,69 @@ def run_ig_pilot(
     max_steps = max(steps_sorted)
 
     print(f"[Pilot IG] Computing reference at m={max_steps} for {len(samples)} reviews...")
-    ref_exp = IntegratedGradientsExplainer(model, steps=max_steps)
-    gold_spans = {}
-    for s in samples:
-        sid = s["sample_id"]
-        res = ref_exp.explain(s["sentence"], target_class=frozen_preds[sid])
-        rs, re_, _ = model.find_review_span(s["sentence"], num_tokens=len(res.attributions))
-        gold_spans[sid] = np.asarray(res.attributions[rs:re_], dtype=np.float64)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
+    tracker = HardwareSessionTracker(
+        model,
+        experiment_name=f"Stage0-Pilot-IG-{model.model_name.split('/')[-1]}",
+        num_samples=len(samples),
+    )
+    tracker.start()
     records = []
-    for m in steps_sorted:
-        exp = IntegratedGradientsExplainer(model, steps=m)
-        times, comp_errs, rhos = [], [], []
+    try:
+        ref_exp = IntegratedGradientsExplainer(model, steps=max_steps)
+        gold_spans = {}
         for s in samples:
             sid = s["sample_id"]
-            res = exp.explain(s["sentence"], target_class=frozen_preds[sid])
-            times.append(float(res.execution_time))
-            comp_errs.append(float(res.metadata["completeness_error"]) * 100.0)
+            res = ref_exp.explain(s["sentence"], target_class=frozen_preds[sid])
             rs, re_, _ = model.find_review_span(s["sentence"], num_tokens=len(res.attributions))
-            span_attr = np.asarray(res.attributions[rs:re_], dtype=np.float64)
-            gold_attr = gold_spans[sid]
-            min_len = min(len(span_attr), len(gold_attr))
-            if m == max_steps:
-                rhos.append(1.0)
-            elif min_len >= 3:
-                rho, _ = spearmanr(span_attr[:min_len], gold_attr[:min_len])
-                if not np.isnan(rho):
-                    rhos.append(float(rho))
+            gold_spans[sid] = np.asarray(res.attributions[rs:re_], dtype=np.float64)
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        records.append({
-            "steps": m,
-            "backward_passes": m,
-            "n_samples": len(samples),
-            "time_per_sample_s": float(np.mean(times)),
-            "time_per_sample_sem_s": float(np.std(times, ddof=1) / np.sqrt(len(times))) if len(times) > 1 else 0.0,
-            "completeness_error_mean_pct": float(np.mean(comp_errs)),
-            "completeness_error_sem_pct": float(np.std(comp_errs, ddof=1) / np.sqrt(len(comp_errs))) if len(comp_errs) > 1 else 0.0,
-            "completeness_error_median_pct": float(np.median(comp_errs)),
-            "convergence_rho_mean": float(np.mean(rhos)),
-            "convergence_rho_sem": float(np.std(rhos, ddof=1) / np.sqrt(len(rhos))) if len(rhos) > 1 and m != max_steps else 0.0,
-        })
-        print(
-            f"[Pilot IG] m={m:3d} | t={records[-1]['time_per_sample_s']:.3f}s | "
-            f"comp_err={records[-1]['completeness_error_mean_pct']:.2f}% | rho={records[-1]['convergence_rho_mean']:.4f}"
+        for m in steps_sorted:
+            exp = IntegratedGradientsExplainer(model, steps=m)
+            times, comp_errs, rhos = [], [], []
+            for s in samples:
+                sid = s["sample_id"]
+                res = exp.explain(s["sentence"], target_class=frozen_preds[sid])
+                times.append(float(res.execution_time))
+                comp_errs.append(float(res.metadata["completeness_error"]) * 100.0)
+                rs, re_, _ = model.find_review_span(s["sentence"], num_tokens=len(res.attributions))
+                span_attr = np.asarray(res.attributions[rs:re_], dtype=np.float64)
+                gold_attr = gold_spans[sid]
+                min_len = min(len(span_attr), len(gold_attr))
+                if m == max_steps:
+                    rhos.append(1.0)
+                elif min_len >= 3:
+                    rho, _ = spearmanr(span_attr[:min_len], gold_attr[:min_len])
+                    if not np.isnan(rho):
+                        rhos.append(float(rho))
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            records.append({
+                "steps": m,
+                "backward_passes": m,
+                "n_samples": len(samples),
+                "time_per_sample_s": float(np.mean(times)),
+                "time_per_sample_sem_s": float(np.std(times, ddof=1) / np.sqrt(len(times))) if len(times) > 1 else 0.0,
+                "completeness_error_mean_pct": float(np.mean(comp_errs)),
+                "completeness_error_sem_pct": float(np.std(comp_errs, ddof=1) / np.sqrt(len(comp_errs))) if len(comp_errs) > 1 else 0.0,
+                "completeness_error_median_pct": float(np.median(comp_errs)),
+                "convergence_rho_mean": float(np.mean(rhos)),
+                "convergence_rho_sem": float(np.std(rhos, ddof=1) / np.sqrt(len(rhos))) if len(rhos) > 1 and m != max_steps else 0.0,
+            })
+            print(
+                f"[Pilot IG] m={m:3d} | t={records[-1]['time_per_sample_s']:.3f}s | "
+                f"comp_err={records[-1]['completeness_error_mean_pct']:.2f}% | rho={records[-1]['convergence_rho_mean']:.4f}"
+            )
+    finally:
+        stats = tracker.stop(num_samples=len(samples))
+        tracker.log_session(
+            output_csv=os.path.join(PROJECT_ROOT, "results", "hardware_session_log.csv"),
+            stats=stats,
+            extra_csv_paths=[os.path.join(os.path.dirname(output_ig_csv), "hardware_session_log_pilot.csv")],
         )
+        tracker.print_summary(stats=stats)
 
     df_ig = pd.DataFrame(records)
     df_ig.to_csv(output_ig_csv, index=False)
