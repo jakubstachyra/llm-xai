@@ -96,6 +96,26 @@ DEFAULT_PROMPT_TEMPLATES: List[PromptTemplateSpec] = [
 ]
 
 
+def _download_sst2_split_fallback(split: str, cache_path: str) -> List[Dict[str, Any]]:
+    """Downloads GLUE SST-2 without pyarrow/datasets when pyarrow-numpy mismatch occurs."""
+    import urllib.request
+    import zipfile
+    import io
+    import csv
+
+    tsv_name = "SST-2/train.tsv" if split == "train" else "SST-2/dev.tsv"
+    url = "https://dl.fbaipublicfiles.com/glue/data/SST-2.zip"
+    raw = urllib.request.urlopen(url, timeout=60).read()
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        with io.TextIOWrapper(zf.open(tsv_name), encoding="utf-8") as f:
+            reader = csv.DictReader(f, delimiter="\t")
+            data = [{"sentence": row["sentence"], "label": int(row["label"])} for row in reader]
+    os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    return data
+
+
 def load_sst2_samples(
     data_path: Optional[str] = None,
     num_samples: int = 872,
@@ -108,9 +128,12 @@ def load_sst2_samples(
         with open(resolved_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     else:
-        from datasets import load_dataset
-        ds = load_dataset("stanfordnlp/sst2", split=split)
-        data = [{"sentence": item["sentence"], "label": item["label"]} for item in ds]
+        try:
+            from datasets import load_dataset
+            ds = load_dataset("stanfordnlp/sst2", split=split)
+            data = [{"sentence": item["sentence"], "label": item["label"]} for item in ds]
+        except Exception:
+            data = _download_sst2_split_fallback(split=split, cache_path=resolved_path)
 
     rng = np.random.RandomState(seed)
     indices = rng.permutation(len(data))[: min(num_samples, len(data))]

@@ -43,14 +43,31 @@ from src.explainers.integrated_gradients import IntegratedGradientsExplainer
 
 
 def _load_sst2_split(split: str = "train") -> list[dict]:
-    """Loads SST-2 split from local JSON if present, else HuggingFace datasets."""
+    """Loads SST-2 split from local JSON if present, else HuggingFace datasets or GLUE fallback."""
     local_path = os.path.join(PROJECT_ROOT, "data", f"sst2_{split}.json")
     if os.path.exists(local_path):
         with open(local_path, "r", encoding="utf-8") as f:
             return json.load(f)
-    from datasets import load_dataset
-    ds = load_dataset("stanfordnlp/sst2", split=split)
-    return [{"id": i, "sentence": item["sentence"], "label": int(item["label"])} for i, item in enumerate(ds)]
+    try:
+        from datasets import load_dataset
+        ds = load_dataset("stanfordnlp/sst2", split=split)
+        return [{"id": i, "sentence": item["sentence"], "label": int(item["label"])} for i, item in enumerate(ds)]
+    except Exception:
+        import urllib.request
+        import zipfile
+        import io
+        import csv
+
+        tsv_name = "SST-2/train.tsv" if split == "train" else "SST-2/dev.tsv"
+        raw = urllib.request.urlopen("https://dl.fbaipublicfiles.com/glue/data/SST-2.zip", timeout=60).read()
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            with io.TextIOWrapper(zf.open(tsv_name), encoding="utf-8") as f:
+                reader = csv.DictReader(f, delimiter="\t")
+                data = [{"sentence": row["sentence"], "label": int(row["label"])} for row in reader]
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        with open(local_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        return data
 
 
 def select_stratified_samples(
