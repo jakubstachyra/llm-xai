@@ -28,7 +28,7 @@ class WordUnit:
 def extract_word_units(
     text: str,
     tokenizer,
-    prompt_prefix: str = "Review: ",
+    prompt_prefix: str = "Classify the sentiment of the following movie review.\nReview: ",
     prompt_suffix: str = "\nSentiment:"
 ) -> List[WordUnit]:
     """

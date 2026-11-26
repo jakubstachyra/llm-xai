@@ -6,6 +6,8 @@ import numpy as np
 from typing import List, Tuple, Dict, Union, Optional
 
 DEFAULT_CALIBRATION_TEXTS: Tuple[str, ...] = ("N/A", "", "[MASK]")
+DEFAULT_PROMPT_PREFIX: str = "Classify the sentiment of the following movie review.\nReview: "
+DEFAULT_PROMPT_SUFFIX: str = "\nSentiment:"
 
 
 class SentimentCausalLM:
@@ -22,8 +24,8 @@ class SentimentCausalLM:
         sub_batch_size: Optional[int] = None,
         calibrate_logits: bool = True,
         calibration_texts: Optional[List[str]] = None,
-        prompt_prefix: str = "Review: ",
-        prompt_suffix: str = "\nSentiment:",
+        prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
+        prompt_suffix: str = DEFAULT_PROMPT_SUFFIX,
         neg_label: str = " negative",
         pos_label: str = " positive",
     ):
@@ -171,8 +173,8 @@ class SentimentCausalLM:
 
     def set_prompt_template(
         self,
-        prompt_prefix: str = "Review: ",
-        prompt_suffix: str = "\nSentiment:",
+        prompt_prefix: str = DEFAULT_PROMPT_PREFIX,
+        prompt_suffix: str = DEFAULT_PROMPT_SUFFIX,
         neg_label: str = " negative",
         pos_label: str = " positive",
         calibrate_logits: Optional[bool] = None,

@@ -39,7 +39,7 @@ def _slice_review_tokens(
     # Positional detection of 'Review:' prefix at the start of the prompt
     start_idx = 0
     joined_prefix = ""
-    for i in range(min(6, len(tokens))):
+    for i in range(min(24, len(tokens))):
         joined_prefix += tokens[i]
         if "review:" in joined_prefix.lower():
             start_idx = i + 1

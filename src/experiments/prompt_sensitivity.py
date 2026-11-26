@@ -444,33 +444,55 @@ class PromptSensitivityExperiment:
         model_name: str,
         output_dir: str,
     ) -> None:
-        fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+        from matplotlib.ticker import FuncFormatter
 
-        # Left panel: Classification accuracy & ROC-AUC
+        template_labels = {
+            "zhao2021_base": "Bazowy (Zhao i in., 2021)",
+            "paraphrase_instruction": "Parafraza: instrukcja",
+            "paraphrase_question": "Parafraza: pytanie",
+            "paraphrase_polarity": "Parafraza: etykieta",
+        }
+        comma_fmt = FuncFormatter(lambda val, _: f"{val:.2f}".replace(".", ","))
+
+        fig, axes = plt.subplots(1, 2, figsize=(13.5, 5.2))
+
+        # Lewy panel: Dokładność (Accuracy) i ROC-AUC klasyfikacji zero-shot
         x = np.arange(len(df_clf))
         width = 0.35
-        axes[0].bar(x - width / 2, df_clf["accuracy"], width, label="Accuracy", color="#2b5c8f")
-        axes[0].bar(x + width / 2, df_clf["roc_auc"], width, label="ROC-AUC", color="#4f9da6")
+        clf_labels = [template_labels.get(t, t) for t in df_clf["template"]]
+        axes[0].bar(
+            x - width / 2, df_clf["accuracy"], width,
+            label="Dokładność (Accuracy)", color="#2b5c8f"
+        )
+        axes[0].bar(
+            x + width / 2, df_clf["roc_auc"], width,
+            label="ROC-AUC", color="#4f9da6"
+        )
         axes[0].set_xticks(x)
-        axes[0].set_xticklabels(df_clf["template"], rotation=20, ha="right")
-        axes[0].set_ylim(0.5, 1.02)
-        axes[0].set_ylabel("Score")
-        axes[0].set_title(f"Zero-Shot Classification ({model_name})")
-        axes[0].legend()
+        axes[0].set_xticklabels(clf_labels, rotation=18, ha="right")
+        axes[0].set_ylim(0.5, 1.03)
+        axes[0].yaxis.set_major_formatter(comma_fmt)
+        axes[0].set_ylabel("Wartość metryki")
+        axes[0].set_title(f"Klasyfikacja zero-shot ({model_name})")
+        axes[0].legend(loc="lower right")
         axes[0].grid(axis="y", alpha=0.3)
 
-        # Right panel: Attribution Spearman rho vs base prompt
+        # Prawy panel: Korelacja rang Spearmana atrybucji względem promptu bazowego
         if not df_summary.empty:
             piv = df_summary.pivot(
                 index="variant_template", columns="explainer", values="spearman_mean"
             )
-            piv.plot(kind="bar", ax=axes[1], rot=20)
-            axes[1].set_ylim(-0.1, 1.05)
-            axes[1].set_ylabel("Spearman $\\rho$ vs. Base Prompt")
-            axes[1].set_title("Attribution Rank Stability Across Prompt Paraphrases")
-            axes[1].legend(title="Explainer")
+            piv.index = [template_labels.get(t, t) for t in piv.index]
+            piv.plot(kind="bar", ax=axes[1], rot=18)
+            axes[1].set_ylim(0.0, 1.03)
+            axes[1].yaxis.set_major_formatter(comma_fmt)
+            axes[1].set_xlabel("")
+            axes[1].set_ylabel("Korelacja Spearmana $\\rho$ (vs baza)")
+            axes[1].set_title("Stabilność rang atrybucji między parafrazami")
+            axes[1].legend(title="Metoda XAI", loc="upper right")
             axes[1].grid(axis="y", alpha=0.3)
 
         plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "prompt_sensitivity_summary.png"), dpi=200)
+        plt.savefig(os.path.join(output_dir, "prompt_sensitivity_summary.png"), dpi=300)
+        plt.savefig(os.path.join(output_dir, "prompt_sensitivity_summary.pdf"))
         plt.close(fig)
