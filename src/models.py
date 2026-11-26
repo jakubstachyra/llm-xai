@@ -16,6 +16,9 @@ class SentimentCausalLM:
     Calculates probabilities for positive/negative sentiment labels with optional
     Contextual Calibration (Zhao et al., ICML 2021) to remove zero-shot label prior bias.
     """
+    _prefix_str: str = DEFAULT_PROMPT_PREFIX
+    _suffix_str: str = DEFAULT_PROMPT_SUFFIX
+
     def __init__(
         self, 
         model_name: str = "microsoft/phi-2", 

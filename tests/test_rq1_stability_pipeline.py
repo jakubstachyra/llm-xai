@@ -341,6 +341,140 @@ class TestRQ1StabilityPipeline(unittest.TestCase):
         assert dummy._effective_sub_batch_size(16, seq_len=95) == 8
         assert dummy._effective_sub_batch_size(6, seq_len=95) == 6
 
+    def test_contextual_calibration_centers_skewed_prior_and_preserves_logit_differences(self):
+        import torch
+        from src.perturbations import TextPerturber
+
+        class _SkewedBaseModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.out = torch.nn.Linear(4, 10, bias=False)
+                with torch.no_grad():
+                    self.out.weight.zero_()
+                    # Token 2 = negative (strong prior +2.4), Token 5 = positive (0.0)
+                    self.out.weight[2, 0] = 2.4
+                    self.out.weight[2, 1] = -1.0
+                    self.out.weight[5, 1] = 1.0
+
+            def get_output_embeddings(self):
+                return self.out
+
+            def forward(self, input_ids=None, inputs_embeds=None, attention_mask=None, use_cache=False):
+                if inputs_embeds is not None:
+                    h = inputs_embeds
+                else:
+                    # Content-free prompts have token count <= 4 -> feature[1] = 0.0
+                    # Positive review has more tokens -> feature[1] = +0.8 (still < 2.4 uncalibrated!)
+                    B, L = input_ids.shape
+                    h = torch.zeros((B, L, 4), dtype=torch.float32)
+                    h[:, -1, 0] = 1.0
+                    if L > 5:
+                        h[:, -1, 1] = 0.8
+                logits = self.out(h)
+                return type("Out", (), {"logits": logits})()
+
+        wrapper = SentimentCausalLM.__new__(SentimentCausalLM)
+        wrapper.model_name = "Qwen/Qwen3-8B-Base"
+        wrapper.device = "cpu"
+        wrapper.dtype = torch.float32
+        wrapper.tokenizer = type(
+            "Tok",
+            (),
+            {
+                "__call__": lambda self, prompt, return_tensors=None, add_special_tokens=False: {
+                    "input_ids": torch.ones((1, max(2, len(prompt.split()))), dtype=torch.long)
+                }
+            },
+        )()
+        wrapper.model = _SkewedBaseModel()
+        wrapper.target_token_ids = [2, 5]
+        wrapper.forward_pass_count = 0
+        wrapper.backward_pass_count = 0
+        wrapper.forward_token_count = 0
+        wrapper._prefix_str = "Review: "
+        wrapper._suffix_str = "\nSentiment:"
+        wrapper._calibration_bias = None
+        wrapper.calibrate_logits = False
+
+        # Uncalibrated: even a positive review (L > 5) predicts class 0 (negative) due to +2.4 prior
+        pred_uncal, probs_uncal = wrapper.predict_single("a wonderfully crafted and deeply moving film")
+        assert pred_uncal == 0
+        assert probs_uncal[0] > 0.65
+
+        # Enable contextual calibration: content-free prompt becomes 50/50 and positive review flips to class 1
+        wrapper.calibrate_logits = True
+        wrapper._compute_calibration_bias(["N/A", "", "[MASK]"])
+        _, probs_cf = wrapper.predict_single("N/A")
+        assert np.allclose(probs_cf, [0.5, 0.5], atol=1e-5)
+
+        pred_cal, probs_cal = wrapper.predict_single("a wonderfully crafted and deeply moving film")
+        assert pred_cal == 1
+        assert probs_cal[1] > 0.80
+
+        # Verify F(x) - F(x_baseline) for logit_diff is invariant to constant calibration shift (IG Completeness)
+        x_in = torch.tensor([[[1.0, 0.8, 0.0, 0.0]]], dtype=torch.float32)
+        x_base = torch.tensor([[[1.0, 0.0, 0.0, 0.0]]], dtype=torch.float32)
+        cal_logits = wrapper.forward_target_logits(inputs_embeds=torch.cat([x_base, x_in], dim=0))
+        cal_diff = (cal_logits[1, 1] - cal_logits[1, 0]) - (cal_logits[0, 1] - cal_logits[0, 0])
+
+        wrapper._calibration_bias = None
+        raw_logits = wrapper.forward_target_logits(inputs_embeds=torch.cat([x_base, x_in], dim=0))
+        raw_diff = (raw_logits[1, 1] - raw_logits[1, 0]) - (raw_logits[0, 1] - raw_logits[0, 0])
+        assert torch.allclose(cal_diff, raw_diff, atol=1e-6)
+
+        # Verify case_toggle is never a no-op on lowercase SST-2 or mixed-case text
+        s_low = "it confirms fincher 's status as a film maker ."
+        s_mix = "It Confirms Fincher's Status."
+        assert TextPerturber.case_toggle(s_low) != s_low
+        assert TextPerturber.case_toggle(s_mix) == s_mix.lower()
+        assert "case_toggle" in TextPerturber.get_categorized_perturbations(s_low)["surface"]
+
+    def test_rq1_resumes_partially_completed_explainer_and_deduplicates_jsonl(self):
+        mock_model = _MockRQ1Model(flip_all_perturbations=False)
+        mock_model.calibrate_logits = True
+        stub_ig = StubIGExplainer(mock_model, steps=25, baseline_type="mean")
+        sample_data = [{"id": 0, "sentence": "the movie was charming and deeply moving.", "label": 1}]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_file = os.path.join(tmpdir, "sst2_mock.json")
+            with open(data_file, "w", encoding="utf-8") as f:
+                json.dump(sample_data, f)
+            out_dir = os.path.join(tmpdir, "rq1_partial")
+            os.makedirs(out_dir, exist_ok=True)
+            ckpt_path = os.path.join(out_dir, "rq1_stability_raw.csv")
+
+            # First run full 1 sample, then simulate interrupted checkpoint by dropping 5 rows from raw CSV
+            exp1 = RQ1StabilityExperiment(model=mock_model, explainers=[stub_ig], data_path=data_file)
+            exp1.run(num_samples=1, seed=42, progress_bar=False, checkpoint_path=ckpt_path, checkpoint_interval=1)
+            exp1.save_results(output_dir=out_dir)
+
+            df_full = pd.read_csv(ckpt_path)
+            full_len = len(df_full)
+            assert full_len == 16
+            df_truncated = df_full.iloc[:11].copy()
+            df_truncated.to_csv(ckpt_path, index=False)
+
+            # Resume: must detect 5 missing perturbations from decisions CSV and complete back to 16
+            exp2 = RQ1StabilityExperiment(model=mock_model, explainers=[stub_ig], data_path=data_file)
+            exp2.run(num_samples=1, seed=42, progress_bar=False, checkpoint_path=ckpt_path, checkpoint_interval=1)
+            exp2.save_results(output_dir=out_dir)
+
+            df_resumed = pd.read_csv(ckpt_path)
+            assert len(df_resumed) == full_len
+
+            # Verify rq1_attributions.jsonl has no duplicate (sample_id, explainer_name, variant) lines
+            attr_jsonl = os.path.join(out_dir, "rq1_attributions.jsonl")
+            with open(attr_jsonl, "r", encoding="utf-8") as fa:
+                attr_lines = [json.loads(line) for line in fa if line.strip()]
+            assert len(attr_lines) == 1
+            assert attr_lines[0]["metadata"]["calibrated"] is True
+
+            # Verify RQ2 rejects cache if calibration setting mismatches
+            uncal_model = _MockRQ1Model(flip_all_perturbations=False)
+            uncal_model.calibrate_logits = False
+            rq2_uncal = RQ2FaithfulnessExperiment(model=uncal_model, explainers=[], output_dir=tmpdir)
+            assert rq2_uncal._is_cache_compatible(stub_ig, attr_lines[0]) is False
+
 
 if __name__ == "__main__":
     unittest.main()
