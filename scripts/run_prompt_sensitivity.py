@@ -40,7 +40,14 @@ def main():
         "--clf-samples",
         type=int,
         default=872,
-        help="Liczba próbek SST-2 do oceny accuracy/F1/ROC-AUC (domyślnie: 872 - pełny zbiór walidacyjny)",
+        help="Liczba próbek SST-2 do oceny accuracy/F1/ROC-AUC (domyślnie: 872)",
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        choices=["train", "validation"],
+        help="Podzbiór SST-2 używany do doboru/kontroli promptu (domyślnie: 'train')",
     )
     parser.add_argument(
         "--attr-samples",
@@ -99,7 +106,7 @@ def main():
         model_name=args.model,
         calibrate_logits=not args.no_calibrate,
     )
-    exp = PromptSensitivityExperiment(model=model)
+    exp = PromptSensitivityExperiment(model=model, split=args.split)
     df_clf, _, df_summary = exp.run(
         clf_samples=args.clf_samples,
         attr_samples=args.attr_samples,

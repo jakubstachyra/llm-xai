@@ -42,14 +42,35 @@ from src.explainers.lime_explainer import LIMEExplainer
 from src.explainers.integrated_gradients import IntegratedGradientsExplainer
 
 
-def select_stratified_samples(model: SentimentCausalLM, samples_per_bin: int = 6, seed: int = 42):
+def _load_sst2_split(split: str = "train") -> list[dict]:
+    """Loads SST-2 split from local JSON if present, else HuggingFace datasets."""
+    local_path = os.path.join(PROJECT_ROOT, "data", f"sst2_{split}.json")
+    if os.path.exists(local_path):
+        with open(local_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    from datasets import load_dataset
+    ds = load_dataset("stanfordnlp/sst2", split=split)
+    return [{"id": i, "sentence": item["sentence"], "label": int(item["label"])} for i, item in enumerate(ds)]
+
+
+def select_stratified_samples(
+    model: SentimentCausalLM,
+    samples_per_bin: int = 6,
+    seed: int = 42,
+    split: str = "train",
+    train_pool_size: int = 2000,
+):
     """Selects N = 3 * samples_per_bin reviews stratified by review token length terciles."""
-    data_path = os.path.join(PROJECT_ROOT, "data", "sst2_validation.json")
-    with open(data_path, "r", encoding="utf-8") as f:
-        all_data = json.load(f)
+    all_data = _load_sst2_split(split=split)
+    if split == "train" and len(all_data) > train_pool_size:
+        pool_rng = np.random.default_rng(seed)
+        pool_idx = sorted(pool_rng.choice(len(all_data), size=train_pool_size, replace=False))
+        all_data = [(int(i), all_data[i]) for i in pool_idx]
+    else:
+        all_data = [(int(i), item) for i, item in enumerate(all_data)]
 
     records = []
-    for idx, item in enumerate(all_data):
+    for idx, item in all_data:
         text = item["sentence"]
         rs, re_, _ = model.find_review_span(text)
         n_tok = int(re_ - rs)
@@ -98,6 +119,8 @@ def pairwise_spearman(vectors: list[np.ndarray]) -> float:
 def run_pilot(
     model_name: str = "microsoft/phi-2",
     samples_per_bin: int = 6,
+    split: str = "train",
+    train_pool_size: int = 2000,
     seeds: tuple[int, ...] = (42, 43, 44, 45, 46),
     length_bins: tuple[str, ...] = ("short", "medium", "long"),
     shap_fixed_grid: tuple[int, ...] = (250, 500, 1000, 1500, 2500),
@@ -107,10 +130,16 @@ def run_pilot(
     run_methods: tuple[str, ...] = ("shap_fixed", "shap_scaled", "lime"),
 ):
     os.makedirs(os.path.dirname(output_csv), exist_ok=True)
-    print(f"[Pilot 5-seed] Loading {model_name}...")
+    print(f"[Pilot 5-seed] Loading {model_name} (split={split})...")
     model = SentimentCausalLM(model_name=model_name, calibrate_logits=True)
 
-    samples, q1, q2 = select_stratified_samples(model, samples_per_bin=samples_per_bin, seed=42)
+    samples, q1, q2 = select_stratified_samples(
+        model,
+        samples_per_bin=samples_per_bin,
+        seed=42,
+        split=split,
+        train_pool_size=train_pool_size,
+    )
     samples = [s for s in samples if s["length_bin"] in length_bins]
     print(
         f"[Pilot 5-seed] Selected {len(samples)} reviews ({samples_per_bin}/bin, bins={length_bins}); "
@@ -321,6 +350,8 @@ def _parse_str_tuple(val: str) -> tuple[str, ...]:
 def main():
     parser = argparse.ArgumentParser(description="5-seed stratified pilot hyperparameter study.")
     parser.add_argument("--model", default="Qwen/Qwen3-1.7B-Base")
+    parser.add_argument("--split", default="train", choices=["train", "validation"], help="SST-2 split for pilot calibration (default: train)")
+    parser.add_argument("--train-pool-size", type=int, default=2000, help="Deterministic pool size sampled from SST-2 train before tercile binning")
     parser.add_argument("--samples-per-bin", type=int, default=10, help="Reviews per length tercile (total N = 3 * samples-per-bin)")
     parser.add_argument("--bins", default="short,medium,long", help="Comma-separated length bins to evaluate (short,medium,long)")
     parser.add_argument("--seeds", default="42,43,44,45,46", help="Comma-separated random seeds")
@@ -346,6 +377,8 @@ def main():
         run_pilot(
             model_name=args.model,
             samples_per_bin=args.samples_per_bin,
+            split=args.split,
+            train_pool_size=args.train_pool_size,
             seeds=seeds,
             length_bins=length_bins,
             shap_fixed_grid=shap_fixed_grid,
@@ -356,7 +389,13 @@ def main():
         )
     if "ig" in methods:
         model = SentimentCausalLM(model_name=args.model, calibrate_logits=True)
-        samples, _, _ = select_stratified_samples(model, samples_per_bin=args.samples_per_bin, seed=42)
+        samples, _, _ = select_stratified_samples(
+            model,
+            samples_per_bin=args.samples_per_bin,
+            seed=42,
+            split=args.split,
+            train_pool_size=args.train_pool_size,
+        )
         samples = [s for s in samples if s["length_bin"] in length_bins]
         frozen_preds = {s["sample_id"]: model.predict_single(s["sentence"])[0] for s in samples}
         ig_out = args.ig_csv or os.path.join(os.path.dirname(args.output_csv), f"ig_convergence_{args.model.split('/')[-1]}.csv")

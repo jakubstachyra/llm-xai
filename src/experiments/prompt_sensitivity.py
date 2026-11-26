@@ -97,17 +97,19 @@ DEFAULT_PROMPT_TEMPLATES: List[PromptTemplateSpec] = [
 
 
 def load_sst2_samples(
-    data_path: str = "data/sst2_validation.json",
+    data_path: Optional[str] = None,
     num_samples: int = 872,
     seed: int = 42,
+    split: str = "train",
 ) -> List[Dict[str, Any]]:
-    """Loads deterministic SST-2 validation samples matching RQ1/RQ2 ordering."""
-    if os.path.exists(data_path):
-        with open(data_path, "r", encoding="utf-8") as f:
+    """Loads deterministic SST-2 samples from the requested split (default: train)."""
+    resolved_path = data_path or os.path.join("data", f"sst2_{split}.json")
+    if os.path.exists(resolved_path):
+        with open(resolved_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     else:
         from datasets import load_dataset
-        ds = load_dataset("stanfordnlp/sst2", split="validation")
+        ds = load_dataset("stanfordnlp/sst2", split=split)
         data = [{"sentence": item["sentence"], "label": item["label"]} for item in ds]
 
     rng = np.random.RandomState(seed)
@@ -137,11 +139,13 @@ class PromptSensitivityExperiment:
         self,
         model: SentimentCausalLM,
         templates: Optional[List[PromptTemplateSpec]] = None,
-        data_path: str = "data/sst2_validation.json",
+        data_path: Optional[str] = None,
+        split: str = "train",
     ):
         self.model = model
         self.templates = templates if templates is not None else list(DEFAULT_PROMPT_TEMPLATES)
         self.data_path = data_path
+        self.split = split
         if not any(t.is_baseline for t in self.templates):
             raise ValueError("At least one template must have is_baseline=True.")
 
@@ -369,6 +373,7 @@ class PromptSensitivityExperiment:
             data_path=self.data_path,
             num_samples=max(clf_samples, attr_samples),
             seed=seed,
+            split=self.split,
         )
         clf_set = all_samples[:clf_samples]
         attr_set = all_samples[:attr_samples]
