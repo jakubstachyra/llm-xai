@@ -107,6 +107,7 @@ def _aggregate_5seed(df_raw: pd.DataFrame, family: str) -> pd.DataFrame:
         time_mean=("time_s_mean", "mean"),
         time_sem=("time_s_mean", "sem"),
         fwd_mean=("forward_passes_mean", "mean"),
+        fwd_sem=("forward_passes_mean", "sem"),
     ).sort_values("param_value")
     return agg
 
@@ -116,8 +117,8 @@ def plot_shap_pilot(df_pilot: pd.DataFrame, df_grid: pd.DataFrame = None, model_
     x = agg["param_value"].to_numpy(dtype=float)
     y_rep = agg["rep_mean"].to_numpy(dtype=float)
     y_rep_sem = agg["rep_sem"].fillna(0.0).to_numpy(dtype=float)
-    y_time = agg["time_mean"].to_numpy(dtype=float)
-    y_time_sem = agg["time_sem"].fillna(0.0).to_numpy(dtype=float)
+    y_fwd = agg["fwd_mean"].to_numpy(dtype=float)
+    y_fwd_sem = agg["fwd_sem"].fillna(0.0).to_numpy(dtype=float)
     n_rev = int(agg["n_reviews"].iloc[0])
     n_seeds = int(agg["n_seeds"].iloc[0])
 
@@ -169,12 +170,12 @@ def plot_shap_pilot(df_pilot: pd.DataFrame, df_grid: pd.DataFrame = None, model_
     ax1.spines["top"].set_visible(False)
 
     ax2 = ax1.twinx()
-    l3 = ax2.plot(x, y_time, marker="^", markersize=5.5, color=c_time, linewidth=1.9, linestyle=":",
-                  label="Średni czas na wyjaśnienie [s] (± SEM)")
-    ax2.fill_between(x, np.maximum(0.0, y_time - y_time_sem), y_time + y_time_sem, color=c_time, alpha=0.16)
-    ax2.set_ylabel("Średni czas na wyjaśnienie [s]", color=c_time)
-    ax2.set_ylim(0.0, float(np.max(y_time + y_time_sem)) * 1.18)
-    ax2.yaxis.set_major_formatter(_comma_fmt(1))
+    l3 = ax2.plot(x, y_fwd, marker="^", markersize=5.5, color=c_time, linewidth=1.9, linestyle=":",
+                  label=r"Średnia liczba przejść w przód $N_{\mathrm{fwd}}$ (± SEM)")
+    ax2.fill_between(x, np.maximum(0.0, y_fwd - y_fwd_sem), y_fwd + y_fwd_sem, color=c_time, alpha=0.16)
+    ax2.set_ylabel(r"Liczba przejść w przód ($N_{\mathrm{fwd}}$)", color=c_time)
+    ax2.set_ylim(0.0, float(np.max(y_fwd + y_fwd_sem)) * 1.18)
+    ax2.yaxis.set_major_formatter(_int_fmt())
     ax2.tick_params(axis="y", labelcolor=c_time)
     ax2.spines["top"].set_visible(False)
 
@@ -274,8 +275,8 @@ def plot_lime_pilot(df_pilot: pd.DataFrame, df_grid: pd.DataFrame = None, model_
     x = agg["param_value"].to_numpy(dtype=float)
     y_rep = agg["rep_mean"].to_numpy(dtype=float)
     y_rep_sem = agg["rep_sem"].fillna(0.0).to_numpy(dtype=float)
-    y_time = agg["time_mean"].to_numpy(dtype=float)
-    y_time_sem = agg["time_sem"].fillna(0.0).to_numpy(dtype=float)
+    y_fwd = agg["fwd_mean"].to_numpy(dtype=float)
+    y_fwd_sem = agg["fwd_sem"].fillna(0.0).to_numpy(dtype=float)
     n_rev = int(agg["n_reviews"].iloc[0])
     n_seeds = int(agg["n_seeds"].iloc[0])
 
@@ -327,12 +328,12 @@ def plot_lime_pilot(df_pilot: pd.DataFrame, df_grid: pd.DataFrame = None, model_
     ax1.spines["top"].set_visible(False)
 
     ax2 = ax1.twinx()
-    l3 = ax2.plot(x, y_time, marker="^", markersize=5.5, color=c_time, linewidth=1.9, linestyle=":",
-                  label="Średni czas na wyjaśnienie [s] (± SEM)")
-    ax2.fill_between(x, np.maximum(0.0, y_time - y_time_sem), y_time + y_time_sem, color=c_time, alpha=0.16)
-    ax2.set_ylabel("Średni czas na wyjaśnienie [s]", color=c_time)
-    ax2.set_ylim(0.0, float(np.max(y_time + y_time_sem)) * 1.18)
-    ax2.yaxis.set_major_formatter(_comma_fmt(1))
+    l3 = ax2.plot(x, y_fwd, marker="^", markersize=5.5, color=c_time, linewidth=1.9, linestyle=":",
+                  label=r"Średnia liczba przejść w przód $N_{\mathrm{fwd}}$ (± SEM)")
+    ax2.fill_between(x, np.maximum(0.0, y_fwd - y_fwd_sem), y_fwd + y_fwd_sem, color=c_time, alpha=0.16)
+    ax2.set_ylabel(r"Liczba przejść w przód ($N_{\mathrm{fwd}}$)", color=c_time)
+    ax2.set_ylim(0.0, float(np.max(y_fwd + y_fwd_sem)) * 1.18)
+    ax2.yaxis.set_major_formatter(_int_fmt())
     ax2.tick_params(axis="y", labelcolor=c_time)
     ax2.spines["top"].set_visible(False)
 
@@ -352,8 +353,7 @@ def plot_ig_pilot(df_ig: pd.DataFrame, model_label: str = "Qwen3-1.7B-Base"):
     x = df["steps"].to_numpy(dtype=float)
     y_err = df["completeness_error_mean_pct"].to_numpy(dtype=float)
     y_err_sem = df["completeness_error_sem_pct"].to_numpy(dtype=float)
-    y_time = df["time_per_sample_s"].to_numpy(dtype=float)
-    y_time_sem = df["time_per_sample_sem_s"].to_numpy(dtype=float) if "time_per_sample_sem_s" in df.columns else np.zeros_like(y_time)
+    y_bwd = df["backward_passes"].to_numpy(dtype=float) if "backward_passes" in df.columns else x
     n_rev = int(df["n_samples"].iloc[0]) if "n_samples" in df.columns else 20
 
     fig, ax1 = plt.subplots(figsize=(7.8, 4.6), dpi=300)
@@ -376,12 +376,11 @@ def plot_ig_pilot(df_ig: pd.DataFrame, model_label: str = "Qwen3-1.7B-Base"):
     ax1.spines["top"].set_visible(False)
 
     ax2 = ax1.twinx()
-    l2 = ax2.plot(x, y_time, marker="^", markersize=5.5, color=c_time, linewidth=1.9, linestyle=":",
-                  label="Średni czas na wyjaśnienie [s] (± SEM)")
-    ax2.fill_between(x, np.maximum(0.0, y_time - y_time_sem), y_time + y_time_sem, color=c_time, alpha=0.16)
-    ax2.set_ylim(0.0, float(np.max(y_time + y_time_sem)) * 1.18)
-    ax2.set_ylabel("Średni czas na wyjaśnienie [s]", color=c_time)
-    ax2.yaxis.set_major_formatter(_comma_fmt(1))
+    l2 = ax2.plot(x, y_bwd, marker="^", markersize=5.5, color=c_time, linewidth=1.9, linestyle=":",
+                  label=r"Liczba przejść wstecz ($N_{\mathrm{bwd}} = m$)")
+    ax2.set_ylim(0.0, float(np.max(y_bwd)) * 1.18)
+    ax2.set_ylabel(r"Liczba przejść wstecz ($N_{\mathrm{bwd}}$)", color=c_time)
+    ax2.yaxis.set_major_formatter(_int_fmt())
     ax2.tick_params(axis="y", labelcolor=c_time)
     ax2.spines["top"].set_visible(False)
 
@@ -423,7 +422,8 @@ def main():
     df_ig = pd.read_csv(args.ig_csv) if (args.ig_csv and os.path.exists(args.ig_csv)) else None
 
     chosen_b = plot_shap_pilot(df_pilot, df_grid, model_label=args.model_label)
-    plot_shap_length_scaling(df_pilot, model_label=args.model_label)
+    if "SHAP_scaled" in df_pilot["method_family"].values:
+        plot_shap_length_scaling(df_pilot, model_label=args.model_label)
     chosen_n = plot_lime_pilot(df_pilot, df_grid, model_label=args.model_label)
     if df_ig is not None:
         plot_ig_pilot(df_ig, model_label=args.model_label)
